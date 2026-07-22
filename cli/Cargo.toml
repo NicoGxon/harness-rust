@@ -1,0 +1,12 @@
+[package]
+name = "cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+agent-core = { path = "../agent-core" }
+brain = { path = "../brain" }
+tokio = { version = "1", features = ["full"] }
+dotenv = "0.15"
+rig = "0.40.0"
+
