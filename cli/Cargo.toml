@@ -9,4 +9,9 @@ brain = { path = "../brain" }
 tokio = { version = "1", features = ["full"] }
 dotenv = "0.15"
 rig = "0.40.0"
-
+dialoguer = "0.12.0"
+console = "0.16.4"
+indicatif = "0.18.6"
+anyhow = "1"
+ratatui = "0.30"
+crossterm = "0.29"
