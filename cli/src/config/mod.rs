@@ -3,4 +3,5 @@ mod setup;
 
 #[allow(unused_imports)]
 pub use model::TyphonConfig;
-pub use setup::resolver_config;
+#[allow(unused_imports)]
+pub use setup::{obtener_directorio_config, resolver_config};

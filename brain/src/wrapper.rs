@@ -19,7 +19,7 @@ pub enum BrainError {
 }
 
 /// Identificador de proveedor LLM soportado.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ModeloLLM {
     Gemini,
     DeepSeek,

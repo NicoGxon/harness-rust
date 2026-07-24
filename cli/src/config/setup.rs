@@ -1,40 +1,133 @@
-use anyhow::Result;
-use brain::{InfoModelo, ModeloLLM};
+use anyhow::{Context, Result, bail};
+use brain::ModeloLLM;
 use console::style;
-use dialoguer::{Confirm, Input, Select};
+use dialoguer::{Input, Select};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::model::TyphonConfig;
+use super::model::{ConfigFile, TyphonConfig};
+
+const DEFAULT_SYSTEM_PROMPT: &str = r#"# System Prompt de Typhon
+
+Eres Typhon, un asistente de IA experto en programación y desarrollo de software multilenguaje.
+Tu objetivo es ayudar al usuario a escribir, refactorizar, depurar y diseñar código de alta calidad en cualquier lenguaje de programación o stack tecnológico.
+
+## Directrices Principales
+1. **Tono y Estilo**:
+   - Sé directo, conciso y ve al grano.
+   - Prioriza mostrar código funcional antes de dar explicaciones extensas.
+   - Mantén las explicaciones teóricas breves y puntuales.
+
+2. **Idioma**:
+   - Responde siempre en español.
+   - Los comentarios dentro del código generado también deben estar en español.
+
+3. **Calidad de Código**:
+   - Escribe código limpio, moderno, idiomático y seguro.
+   - Aplica buenas prácticas de desarrollo, manejo adecuado de errores y estructura clara.
+   - Si no estás seguro del lenguaje o framework específico, consulta o solicita aclaraciones necesarias.
+"#;
+
+/// Obtiene el directorio de configuración ~/.config/typhon
+pub fn obtener_directorio_config() -> Result<PathBuf> {
+    let config_dir = dirs::config_dir()
+        .context("No se pudo determinar el directorio de configuración del usuario")?
+        .join("typhon");
+    Ok(config_dir)
+}
 
 /// Resuelve la configuración completa para una sesión de chat.
-/// Prioridad: variables .env > prompt interactivo (dialoguer).
-pub async fn resolver_config() -> Result<TyphonConfig> {
-    let provider = resolver_proveedor()?;
-    let api_key = resolver_api_key(provider)?;
-    let model = resolver_modelo(provider, &api_key).await?;
-    let temperature = resolver_temperatura()?;
-    let preamble = resolver_preamble()?;
-    let verbose = resolver_verbose()?;
+pub async fn resolver_config(force_reconfig: bool) -> Result<TyphonConfig> {
+    let config_dir = obtener_directorio_config()?;
+    fs::create_dir_all(&config_dir)
+        .with_context(|| format!("Error al crear el directorio {}", config_dir.display()))?;
+
+    let config_path = config_dir.join("config.toml");
+    let (config_file, prompt_path) =
+        cargar_o_crear_config(&config_dir, &config_path, force_reconfig).await?;
+    let preamble = fs::read_to_string(&prompt_path).with_context(|| {
+        format!(
+            "Error al leer el system prompt desde {}",
+            prompt_path.display()
+        )
+    })?;
+
+    let api_key = resolver_api_key(config_file.provider)?;
 
     Ok(TyphonConfig {
-        provider,
-        model,
+        provider: config_file.provider,
+        model: config_file.model,
         api_key,
-        temperature,
+        temperature: config_file.temperature,
         preamble,
-        verbose,
+        verbose: config_file.verbose,
     })
+}
+
+async fn cargar_o_crear_config(
+    config_dir: &Path,
+    config_path: &Path,
+    force_reconfig: bool,
+) -> Result<(ConfigFile, PathBuf)> {
+    if force_reconfig || !config_path.exists() {
+        println!("  [i] Iniciando configuración de proveedor y modelo..."); // Proceso directo de creación de configuración
+        let provider = resolver_proveedor()?;
+        let api_key_temp = resolver_api_key(provider)?;
+        let model = resolver_modelo(provider, &api_key_temp).await?;
+
+        let config_file = ConfigFile {
+            provider,
+            model,
+            temperature: 0.7,
+            verbose: true,
+            prompt_file: "system_prompt.md".to_string(),
+        };
+
+        let toml_str = toml::to_string_pretty(&config_file)
+            .context("Error al serializar la configuración inicial")?;
+        fs::write(config_path, toml_str)
+            .with_context(|| format!("Error al crear {}", config_path.display()))?;
+
+        let prompt_path = config_dir.join(&config_file.prompt_file);
+        if !prompt_path.exists() {
+            fs::write(&prompt_path, DEFAULT_SYSTEM_PROMPT)
+                .with_context(|| format!("Error al crear {}", prompt_path.display()))?;
+        }
+
+        println!(
+            "  [✓] Configuración inicial guardada en {}",
+            style(config_dir.display()).bold()
+        );
+
+        return Ok((config_file, prompt_path));
+    }
+
+    let content = fs::read_to_string(config_path)
+        .with_context(|| format!("Error al leer {}", config_path.display()))?;
+    let config_file: ConfigFile = toml::from_str(&content)
+        .with_context(|| format!("Error al deserializar {}", config_path.display()))?;
+
+    let prompt_path = if Path::new(&config_file.prompt_file).is_absolute() {
+        PathBuf::from(&config_file.prompt_file)
+    } else {
+        config_dir.join(&config_file.prompt_file)
+    };
+
+    if !prompt_path.exists() {
+        fs::write(&prompt_path, DEFAULT_SYSTEM_PROMPT)
+            .with_context(|| format!("Error al crear {}", prompt_path.display()))?;
+    }
+
+    Ok((config_file, prompt_path))
 }
 
 fn resolver_proveedor() -> Result<ModeloLLM> {
     let items = &["DeepSeek", "Gemini"];
     let selection = Select::new()
-        .with_prompt(format!(
-            "{} Selecciona el proveedor de LLM",
-            style("⚡").bold()
-        ))
+        .with_prompt("Selecciona el proveedor de LLM")
         .items(items)
         .default(0)
         .interact()?;
@@ -55,21 +148,12 @@ fn resolver_api_key(provider: ModeloLLM) -> Result<String> {
     if let Ok(key) = env::var(env_key_name)
         && !key.is_empty()
     {
-        println!(
-            "  {} API key cargada desde {}",
-            style("✔").green(),
-            style(env_key_name).dim()
-        );
         return Ok(key);
     }
 
     // Si no hay en .env, pedir interactivamente
     let key: String = Input::new()
-        .with_prompt(format!(
-            "{} Ingresa tu API Key ({})",
-            style("🔑").bold(),
-            env_key_name
-        ))
+        .with_prompt(format!("Ingresa tu API Key ({})", env_key_name))
         .validate_with(|input: &String| {
             if input.trim().is_empty() {
                 Err("La API key no puede estar vacía")
@@ -97,12 +181,13 @@ async fn resolver_modelo(provider: ModeloLLM, api_key: &str) -> Result<String> {
             spinner.finish_and_clear();
             m
         }
-        _ => {
-            spinner.finish_with_message(format!(
-                "{}",
-                style("No se pudieron listar los modelos. Usando respaldo.").yellow()
-            ));
-            modelos_fallback(provider)
+        Ok(_) => {
+            spinner.finish_and_clear();
+            bail!("No se encontraron modelos disponibles para {provider}.");
+        }
+        Err(e) => {
+            spinner.finish_and_clear();
+            bail!("Error al consultar los modelos del proveedor {provider}: {e}");
         }
     };
 
@@ -112,75 +197,10 @@ async fn resolver_modelo(provider: ModeloLLM, api_key: &str) -> Result<String> {
         .collect();
 
     let selection = Select::new()
-        .with_prompt(format!("{} Selecciona el modelo", style("🧠").bold()))
+        .with_prompt("Selecciona el modelo")
         .items(&items)
         .default(0)
         .interact()?;
 
     Ok(modelos[selection].id.clone())
-}
-
-fn resolver_temperatura() -> Result<f64> {
-    let temp: f64 = Input::new()
-        .with_prompt(format!("{} Temperatura (0.0 - 2.0)", style("🌡️").bold()))
-        .default(0.7)
-        .validate_with(|input: &f64| {
-            if *input >= 0.0 && *input <= 2.0 {
-                Ok(())
-            } else {
-                Err("Debe estar entre 0.0 y 2.0")
-            }
-        })
-        .interact_text()?;
-
-    Ok(temp)
-}
-
-fn resolver_preamble() -> Result<String> {
-    let default =
-        "Eres Typhon, un asistente de IA potente y servicial de pair programming en Rust.";
-
-    let preamble: String = Input::new()
-        .with_prompt(format!("{} System prompt", style("📝").bold()))
-        .default(default.to_string())
-        .interact_text()?;
-
-    Ok(preamble)
-}
-
-fn resolver_verbose() -> Result<bool> {
-    let verbose = Confirm::new()
-        .with_prompt(format!(
-            "{} ¿Mostrar métricas de ejecución?",
-            style("📊").bold()
-        ))
-        .default(false)
-        .interact()?;
-
-    Ok(verbose)
-}
-
-fn modelos_fallback(provider: ModeloLLM) -> Vec<InfoModelo> {
-    match provider {
-        ModeloLLM::Gemini => vec![
-            InfoModelo {
-                id: "gemini-1.5-flash".into(),
-                owned_by: "google".into(),
-            },
-            InfoModelo {
-                id: "gemini-1.5-pro".into(),
-                owned_by: "google".into(),
-            },
-        ],
-        ModeloLLM::DeepSeek => vec![
-            InfoModelo {
-                id: "deepseek-chat".into(),
-                owned_by: "deepseek".into(),
-            },
-            InfoModelo {
-                id: "deepseek-reasoner".into(),
-                owned_by: "deepseek".into(),
-            },
-        ],
-    }
 }
