@@ -57,18 +57,15 @@ impl Tool for ListDirTool {
         let mut files = Vec::new();
         let mut dirs = Vec::new();
 
-        for entry in entries {
-            if let Ok(entry) = entry {
-                let file_name = entry.file_name().to_string_lossy().to_string();
-                if let Ok(ft) = entry.file_type() {
-                    if ft.is_dir() {
-                        dirs.push(format!("{}/", file_name));
-                    } else {
-                        files.push(file_name);
-                    }
-                } else {
-                    files.push(file_name);
-                }
+        for entry in entries.flatten() {
+            let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+            let mut file_name = entry.file_name().to_string_lossy().into_owned();
+
+            if is_dir {
+                file_name.push('/');
+                dirs.push(file_name);
+            } else {
+                files.push(file_name);
             }
         }
 
