@@ -13,11 +13,7 @@ pub struct AgentRunner {
 }
 
 impl AgentRunner {
-    pub fn new(
-        brain: BrainWrapper,
-        max_turns: u32,
-        hooks: Vec<Box<dyn ExecutionHook>>,
-    ) -> Self {
+    pub fn new(brain: BrainWrapper, max_turns: u32, hooks: Vec<Box<dyn ExecutionHook>>) -> Self {
         Self {
             brain,
             max_turns,
@@ -53,20 +49,25 @@ impl AgentRunner {
         input_rx: &mut mpsc::UnboundedReceiver<UserInput>,
     ) {
         let _ = event_tx.send(AgentEvent::StreamStart);
-
         let start_time = std::time::Instant::now();
-
         match self.brain.prompt(prompt, self.max_turns).await {
             Ok(mut stream) => {
                 let mut full_response = String::new();
                 let mut token_usage = Usage::default();
-
                 'stream_loop: loop {
                     tokio::select! {
                         cancel_msg = input_rx.recv() => {
-                            if let Some(UserInput::Cancel | UserInput::Exit) = cancel_msg {
-                                let _ = event_tx.send(AgentEvent::Cancelled);
-                                return;
+                            match cancel_msg {
+                                Some(UserInput::Cancel | UserInput::Exit) => {
+                                    let _ = event_tx.send(AgentEvent::Cancelled);
+                                    return;
+                                }
+                                Some(_) => {} // otros mensajes de input se ignoran acá
+                                None => {
+                                    // canal cerrado: no hay más cancelaciones posibles,
+                                    // dejamos de pollear esta rama y seguimos consumiendo el stream
+                                    std::future::pending::<()>().await;
+                                }
                             }
                         }
                         chunk_opt = stream.next() => {
@@ -84,15 +85,14 @@ impl AgentRunner {
                                 }
                                 Some(Err(e)) => {
                                     let _ = event_tx.send(AgentEvent::Error(e.to_string()));
+                                    break 'stream_loop;
                                 }
                                 None => break 'stream_loop, // Fin del stream
                             }
                         }
                     }
                 }
-
                 let duration = start_time.elapsed();
-
                 // Notificar a los hooks
                 let metrics = ExecutionMetrics {
                     prompt: prompt.to_string(),
@@ -101,11 +101,9 @@ impl AgentRunner {
                     usage: token_usage.clone(),
                     max_turns: self.max_turns,
                 };
-
                 for hook in &self.hooks {
                     hook.on_execution_completed(&metrics);
                 }
-
                 let _ = event_tx.send(AgentEvent::StreamEnd {
                     duration,
                     response_len: full_response.len(),
@@ -113,10 +111,7 @@ impl AgentRunner {
                 });
             }
             Err(e) => {
-                let _ = event_tx.send(AgentEvent::Error(format!(
-                    "Error al iniciar stream: {}",
-                    e
-                )));
+                let _ = event_tx.send(AgentEvent::Error(format!("Error al iniciar stream: {}", e)));
             }
         }
     }
