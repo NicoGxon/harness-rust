@@ -136,7 +136,7 @@ impl MarkdownStreamProcessor {
             return Ok(());
         }
 
-        if self.col_count > 0 && self.col_count + 1 <= self.max_cols {
+        if self.col_count < self.max_cols {
             print!(" ");
             self.col_count += 1;
             io::stdout().flush()?;
@@ -155,7 +155,9 @@ impl MarkdownStreamProcessor {
         }
 
         // Fila de tabla de Markdown (| ... |)
-        if !self.in_code_block && (trimmed.starts_with('|') || (self.in_table && trimmed.contains('|'))) {
+        if !self.in_code_block
+            && (trimmed.starts_with('|') || (self.in_table && trimmed.contains('|')))
+        {
             self.handle_table_row(&trimmed)?;
             self.line_buffer.clear();
             self.pending_word.clear();
@@ -260,7 +262,11 @@ impl MarkdownStreamProcessor {
                 self.table_col_widths.len()
             };
             for idx in 0..count {
-                let width = self.table_col_widths.get(idx).copied().unwrap_or(max_col_width);
+                let width = self
+                    .table_col_widths
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(max_col_width);
                 line.push_str(&"─".repeat(width + 2));
                 if idx + 1 < count {
                     line.push('┼');
@@ -278,8 +284,10 @@ impl MarkdownStreamProcessor {
             if idx >= self.table_col_widths.len() {
                 self.table_col_widths.push(vis_len.max(4));
             } else {
-                self.table_col_widths[idx] =
-                    self.table_col_widths[idx].max(vis_len).min(max_col_width).max(4);
+                self.table_col_widths[idx] = self.table_col_widths[idx]
+                    .max(vis_len)
+                    .min(max_col_width)
+                    .max(4);
             }
         }
 
@@ -542,13 +550,8 @@ pub fn get_visible_len(word: &str, in_code_block: bool) -> usize {
     if in_code_block {
         word.chars().count()
     } else {
-        word.replace("**", "")
-            .replace("__", "")
-            .replace("~~", "")
-            .replace('*', "")
-            .replace('_', "")
-            .replace('`', "")
-            .chars()
+        word.chars()
+            .filter(|c| !matches!(c, '*' | '_' | '~' | '`'))
             .count()
     }
 }

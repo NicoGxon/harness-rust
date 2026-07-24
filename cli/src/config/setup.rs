@@ -52,15 +52,15 @@ fn resolver_api_key(provider: ModeloLLM) -> Result<String> {
     };
 
     // Intentar desde .env primero
-    if let Ok(key) = env::var(env_key_name) {
-        if !key.is_empty() {
-            println!(
-                "  {} API key cargada desde {}",
-                style("✔").green(),
-                style(env_key_name).dim()
-            );
-            return Ok(key);
-        }
+    if let Ok(key) = env::var(env_key_name)
+        && !key.is_empty()
+    {
+        println!(
+            "  {} API key cargada desde {}",
+            style("✔").green(),
+            style(env_key_name).dim()
+        );
+        return Ok(key);
     }
 
     // Si no hay en .env, pedir interactivamente
@@ -122,10 +122,7 @@ async fn resolver_modelo(provider: ModeloLLM, api_key: &str) -> Result<String> {
 
 fn resolver_temperatura() -> Result<f64> {
     let temp: f64 = Input::new()
-        .with_prompt(format!(
-            "{} Temperatura (0.0 - 2.0)",
-            style("🌡️").bold()
-        ))
+        .with_prompt(format!("{} Temperatura (0.0 - 2.0)", style("🌡️").bold()))
         .default(0.7)
         .validate_with(|input: &f64| {
             if *input >= 0.0 && *input <= 2.0 {
@@ -140,7 +137,8 @@ fn resolver_temperatura() -> Result<f64> {
 }
 
 fn resolver_preamble() -> Result<String> {
-    let default = "Eres Typhon, un asistente de IA potente y servicial de pair programming en Rust.";
+    let default =
+        "Eres Typhon, un asistente de IA potente y servicial de pair programming en Rust.";
 
     let preamble: String = Input::new()
         .with_prompt(format!("{} System prompt", style("📝").bold()))

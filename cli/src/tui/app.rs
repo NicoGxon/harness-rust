@@ -2,13 +2,13 @@ use agent_core::{AgentEvent, AgentRunner, UserInput};
 use console::style;
 use crossterm::cursor::MoveToPreviousLine;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType};
+use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
 
 use ratatui::{
+    Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
     style::{Color, Style},
     widgets::{Block, Borders, Paragraph},
-    Terminal, TerminalOptions, Viewport,
 };
 use std::io::{self, Write};
 use tokio::sync::mpsc;
@@ -79,75 +79,72 @@ pub async fn run_tui(
                 frame.set_cursor_position((cursor_x, cursor_y));
             })?;
 
-            if event::poll(std::time::Duration::from_millis(30))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == crossterm::event::KeyEventKind::Press {
-                        match (key.code, key.modifiers) {
-                            // Salir
-                            (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
-                                let _ = terminal.clear();
-                                let _ = crossterm::execute!(
-                                    io::stdout(),
-                                    MoveToPreviousLine(current_viewport_height.saturating_sub(1)),
-                                    Clear(ClearType::FromCursorDown)
-                                );
-                                disable_raw_mode()?;
-                                println!("\nSaliendo de Typhon...");
-                                let _ = input_tx.send(UserInput::Exit);
-                                let _ = agent_handle.await;
-                                return Ok(());
-                            }
-                            // Insertar salto de línea con Alt+Enter o Shift+Enter
-                            (KeyCode::Enter, KeyModifiers::ALT)
-                            | (KeyCode::Enter, KeyModifiers::SHIFT) => {
-                                input_state.insert_char('\n');
-                            }
-                            // Enviar mensaje con Enter
-                            (KeyCode::Enter, _) => {
-                                let trimmed = input_state.text.trim().to_string();
-                                input_state.clear();
-                                if !trimmed.is_empty() {
-                                    break Some(trimmed);
-                                }
-                            }
-                            // Movimiento entre palabras (Alt + Izquierda/Derecha o Ctrl + Izquierda/Derecha)
-                            (KeyCode::Left, KeyModifiers::ALT)
-                            | (KeyCode::Left, KeyModifiers::CONTROL) => {
-                                input_state.move_word_left();
-                            }
-                            (KeyCode::Right, KeyModifiers::ALT)
-                            | (KeyCode::Right, KeyModifiers::CONTROL) => {
-                                input_state.move_word_right();
-                            }
-                            // Movimiento carácter a carácter
-                            (KeyCode::Left, _) => {
-                                input_state.move_left();
-                            }
-                            (KeyCode::Right, _) => {
-                                input_state.move_right();
-                            }
-                            // Inicio / Fin de línea
-                            (KeyCode::Home, _) | (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
-                                input_state.move_home();
-                            }
-                            (KeyCode::End, _) | (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
-                                input_state.move_end();
-                            }
-                            // Borrado
-                            (KeyCode::Backspace, _) => {
-                                input_state.delete_prev_char();
-                            }
-                            (KeyCode::Delete, _) => {
-                                input_state.delete_next_char();
-                            }
-                            // Insertar caracteres
-                            (KeyCode::Char(c), KeyModifiers::NONE)
-                            | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
-                                input_state.insert_char(c);
-                            }
-                            _ => {}
+            if event::poll(std::time::Duration::from_millis(30))?
+                && let Event::Key(key) = event::read()?
+                && key.kind == crossterm::event::KeyEventKind::Press
+            {
+                match (key.code, key.modifiers) {
+                    // Salir
+                    (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
+                        let _ = terminal.clear();
+                        let _ = crossterm::execute!(
+                            io::stdout(),
+                            MoveToPreviousLine(current_viewport_height.saturating_sub(1)),
+                            Clear(ClearType::FromCursorDown)
+                        );
+                        disable_raw_mode()?;
+                        println!("\nSaliendo de Typhon...");
+                        let _ = input_tx.send(UserInput::Exit);
+                        let _ = agent_handle.await;
+                        return Ok(());
+                    }
+                    // Insertar salto de línea con Alt+Enter o Shift+Enter
+                    (KeyCode::Enter, KeyModifiers::ALT) | (KeyCode::Enter, KeyModifiers::SHIFT) => {
+                        input_state.insert_char('\n');
+                    }
+                    // Enviar mensaje con Enter
+                    (KeyCode::Enter, _) => {
+                        let trimmed = input_state.text.trim().to_string();
+                        input_state.clear();
+                        if !trimmed.is_empty() {
+                            break Some(trimmed);
                         }
                     }
+                    // Movimiento entre palabras (Alt + Izquierda/Derecha o Ctrl + Izquierda/Derecha)
+                    (KeyCode::Left, KeyModifiers::ALT) | (KeyCode::Left, KeyModifiers::CONTROL) => {
+                        input_state.move_word_left();
+                    }
+                    (KeyCode::Right, KeyModifiers::ALT)
+                    | (KeyCode::Right, KeyModifiers::CONTROL) => {
+                        input_state.move_word_right();
+                    }
+                    // Movimiento carácter a carácter
+                    (KeyCode::Left, _) => {
+                        input_state.move_left();
+                    }
+                    (KeyCode::Right, _) => {
+                        input_state.move_right();
+                    }
+                    // Inicio / Fin de línea
+                    (KeyCode::Home, _) | (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
+                        input_state.move_home();
+                    }
+                    (KeyCode::End, _) | (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
+                        input_state.move_end();
+                    }
+                    // Borrado
+                    (KeyCode::Backspace, _) => {
+                        input_state.delete_prev_char();
+                    }
+                    (KeyCode::Delete, _) => {
+                        input_state.delete_next_char();
+                    }
+                    // Insertar caracteres
+                    (KeyCode::Char(c), KeyModifiers::NONE)
+                    | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
+                        input_state.insert_char(c);
+                    }
+                    _ => {}
                 }
             }
         };

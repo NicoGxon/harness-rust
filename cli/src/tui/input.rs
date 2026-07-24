@@ -37,10 +37,8 @@ impl InputState {
     }
 
     pub fn delete_next_char(&mut self) {
-        if self.cursor < self.char_count() {
-            if let Some((byte_idx, _)) = self.text.char_indices().nth(self.cursor) {
-                self.text.remove(byte_idx);
-            }
+        if let Some((byte_idx, _)) = self.text.char_indices().nth(self.cursor) {
+            self.text.remove(byte_idx);
         }
     }
 
