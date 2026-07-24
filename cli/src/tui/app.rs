@@ -7,6 +7,7 @@ use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     widgets::{Block, Borders, Paragraph},
 };
@@ -18,8 +19,8 @@ use super::markdown::MarkdownStreamProcessor;
 
 pub async fn run_tui(
     runner: AgentRunner,
-    _model_name: String,
-    _provider_name: String,
+    model_name: String,
+    provider_name: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (input_tx, input_rx) = mpsc::unbounded_channel::<UserInput>();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -28,12 +29,13 @@ pub async fn run_tui(
     let agent_handle = tokio::spawn(async move { runner.run(input_rx, event_tx).await });
 
     let mut input_state = InputState::new();
+    let mut last_metrics: Option<String> = None;
 
     loop {
         // Habilitar raw mode para interactuar con la caja inline de Ratatui
         enable_raw_mode()?;
 
-        let mut current_viewport_height = 3u16;
+        let mut current_viewport_height = 4u16;
         let mut terminal = Terminal::with_options(
             CrosstermBackend::new(io::stdout()),
             TerminalOptions {
@@ -47,7 +49,7 @@ pub async fn run_tui(
             let (display_text, target_x, target_y, total_lines) =
                 input_state.format_display_lines(term_width);
 
-            let needed_height = (total_lines + 2).clamp(3, 12);
+            let needed_height = (total_lines + 3).clamp(4, 13);
             if needed_height != current_viewport_height {
                 let _ = terminal.clear();
                 let _ = crossterm::execute!(
@@ -68,14 +70,33 @@ pub async fn run_tui(
 
             terminal.draw(|frame| {
                 let area = frame.area();
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(needed_height.saturating_sub(1)),
+                        Constraint::Length(1),
+                    ])
+                    .split(area);
+
                 let input_widget = Paragraph::new(display_text)
                     .style(Style::default().fg(Color::White))
                     .block(Block::default().borders(Borders::TOP | Borders::BOTTOM));
-                frame.render_widget(input_widget, area);
+                frame.render_widget(input_widget, chunks[0]);
+
+                let metrics_text = match &last_metrics {
+                    Some(m) => format!("  {}  |  Modelo: {} ({})", m, model_name, provider_name),
+                    None => format!(
+                        "  En espera de primera ejecución...  |  Modelo: {} ({})",
+                        model_name, provider_name
+                    ),
+                };
+                let metrics_widget =
+                    Paragraph::new(metrics_text).style(Style::default().fg(Color::DarkGray));
+                frame.render_widget(metrics_widget, chunks[1]);
 
                 // Posicionar el cursor en la línea y columna exactas tras el formateo explícito
-                let cursor_x = area.x + target_x;
-                let cursor_y = area.y + 1 + target_y;
+                let cursor_x = chunks[0].x + target_x;
+                let cursor_y = chunks[0].y + 1 + target_y;
                 frame.set_cursor_position((cursor_x, cursor_y));
             })?;
 
@@ -185,9 +206,28 @@ pub async fn run_tui(
                         println!("\nError: {}", err);
                         break;
                     }
-                    AgentEvent::StreamEnd { .. } => {
+                    AgentEvent::StreamEnd {
+                        duration,
+                        response_len,
+                        usage,
+                    } => {
                         let _ = stream_processor.flush_final();
                         println!();
+                        let metrics_str = if usage.total_tokens > 0 {
+                            format!(
+                                "Tiempo: {:.2?} | Tokens: {} inp / {} out ({} total)",
+                                duration,
+                                usage.input_tokens,
+                                usage.output_tokens,
+                                usage.total_tokens
+                            )
+                        } else {
+                            format!(
+                                "Tiempo: {:.2?} | Respuesta: {} caracteres",
+                                duration, response_len
+                            )
+                        };
+                        last_metrics = Some(metrics_str);
                         break;
                     }
                     _ => {}

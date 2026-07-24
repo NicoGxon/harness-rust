@@ -1,3 +1,5 @@
+use console::style;
+
 /// Devuelve las líneas del banner en ANSI Art para ser mostrado como bienvenida en Typhon.
 pub fn get_banner_lines() -> &'static [&'static str] {
     &[
@@ -12,10 +14,29 @@ pub fn get_banner_lines() -> &'static [&'static str] {
     ]
 }
 
-pub fn imprimir_banner() {
+pub fn imprimir_banner(provider: &str, model: &str, current_dir: &str) {
+    let banner_lines = get_banner_lines();
+
+    let right_info = [
+        format!("{}", style("TYPHON CLI").bold().cyan()),
+        format!(
+            "{}",
+            style("───────────────────────────────────────────").dim()
+        ),
+        format!("{}: {}", style("Proveedor").bold(), style(provider).green()),
+        format!("{}: {}", style("Modelo   ").bold(), style(model).yellow()),
+        format!("{}", style(current_dir).dim()),
+        format!(
+            "{}",
+            style("───────────────────────────────────────────").dim()
+        ),
+        format!("{}", style("Escribe un mensaje o Ctrl+C para salir.").dim()),
+    ];
+
     println!();
-    for line in get_banner_lines() {
-        println!("{}", line);
+    for (i, line) in banner_lines.iter().enumerate() {
+        let info = right_info.get(i).map(|s| s.as_str()).unwrap_or("");
+        println!("{}   {}", line, info);
     }
     println!();
 }

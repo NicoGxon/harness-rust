@@ -10,9 +10,18 @@ use rig::memory::InMemoryConversationMemory;
 async fn main() -> Result<()> {
     dotenv::dotenv().ok();
 
-    ui::imprimir_banner();
+    let args: Vec<String> = std::env::args().collect();
+    let force_reconfig = args
+        .iter()
+        .any(|arg| arg == "--reconfig" || arg == "--config" || arg == "-c");
 
-    let config = config::resolver_config().await?;
+    let config = config::resolver_config(force_reconfig).await?;
+
+    let current_dir = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+
+    ui::imprimir_banner(&format!("{}", config.provider), &config.model, &current_dir);
 
     let memory = InMemoryConversationMemory::new();
     let brain = BrainWrapper::new(
@@ -24,12 +33,7 @@ async fn main() -> Result<()> {
         memory,
     );
 
-    let mut hooks: Vec<Box<dyn agent_core::ExecutionHook>> = Vec::new();
-    if config.verbose {
-        hooks.push(Box::new(agent_core::ConsoleTimeHook));
-    }
-
-    let runner = agent_core::AgentRunner::new(brain, 10, hooks);
+    let runner = agent_core::AgentRunner::new(brain, 10, Vec::new());
     let provider_str = format!("{:?}", config.provider);
 
     tui::run_tui(runner, config.model, provider_str)
