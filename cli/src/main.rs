@@ -36,7 +36,17 @@ async fn main() -> Result<()> {
     let runner = agent_core::AgentRunner::new(brain, 10, Vec::new());
     let provider_str = format!("{:?}", config.provider);
 
-    tui::run_tui(runner, config.model, provider_str)
+    let session_info = tui::commands::SessionInfo::from_paths(
+        provider_str.clone(),
+        config.model.clone(),
+        config.temperature,
+        10,
+        current_dir,
+        &config.config_path,
+        &config.prompt_path,
+    );
+
+    tui::run_tui(runner, session_info)
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 

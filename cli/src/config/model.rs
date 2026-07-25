@@ -1,5 +1,6 @@
 use brain::ModeloLLM;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Estructura de configuración persistible en `config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +26,8 @@ pub struct TyphonConfig {
     pub api_key: String,
     pub temperature: f64,
     pub preamble: String,
+    pub config_path: PathBuf,
+    pub prompt_path: PathBuf,
     #[allow(dead_code)]
     pub verbose: bool,
 }

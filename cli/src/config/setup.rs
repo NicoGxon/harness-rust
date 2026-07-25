@@ -63,6 +63,8 @@ pub async fn resolver_config(force_reconfig: bool) -> Result<TyphonConfig> {
         api_key,
         temperature: config_file.temperature,
         preamble,
+        config_path,
+        prompt_path,
         verbose: config_file.verbose,
     })
 }

@@ -7,20 +7,77 @@ use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Style},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear as ClearWidget, Paragraph, Wrap},
 };
 use std::io::{self, Write};
 use tokio::sync::mpsc;
 
+use super::commands::{self, Command, SessionInfo};
 use super::input::InputState;
 use super::markdown::MarkdownStreamProcessor;
 
+type TuiResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+/// Muestra información temporal debajo del contenido actual y vuelve a la TUI al pulsar Esc.
+fn show_info_view(title: &str, content: &str) -> TuiResult {
+    enable_raw_mode()?;
+
+    let viewport_height = (content.lines().count() as u16 + 4).clamp(6, 20);
+    let mut terminal = Terminal::with_options(
+        CrosstermBackend::new(io::stdout()),
+        TerminalOptions {
+            viewport: Viewport::Inline(viewport_height),
+        },
+    )?;
+
+    let result: TuiResult = (|| {
+        loop {
+            terminal.draw(|frame| {
+                let body = format!("{}\n\nPresiona Esc para volver", content);
+
+                frame.render_widget(ClearWidget, frame.area());
+                frame.render_widget(
+                    Paragraph::new(body)
+                        .alignment(Alignment::Left)
+                        .wrap(Wrap { trim: false })
+                        .block(
+                            Block::default()
+                                .title(format!(" {} ", title))
+                                .borders(Borders::ALL)
+                                .style(Style::default().fg(Color::White)),
+                        ),
+                    frame.area(),
+                );
+            })?;
+
+            if event::poll(std::time::Duration::from_millis(50))?
+                && let Event::Key(key) = event::read()?
+                && key.kind == crossterm::event::KeyEventKind::Press
+                && key.code == KeyCode::Esc
+            {
+                break;
+            }
+        }
+
+        Ok(())
+    })();
+
+    let _ = terminal.clear();
+    let cleanup_result = crossterm::execute!(
+        io::stdout(),
+        MoveToPreviousLine(viewport_height.saturating_sub(1)),
+        Clear(ClearType::FromCursorDown)
+    );
+    disable_raw_mode()?;
+    cleanup_result?;
+    result
+}
+
 pub async fn run_tui(
     runner: AgentRunner,
-    model_name: String,
-    provider_name: String,
+    session_info: SessionInfo,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (input_tx, input_rx) = mpsc::unbounded_channel::<UserInput>();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -84,10 +141,13 @@ pub async fn run_tui(
                 frame.render_widget(input_widget, chunks[0]);
 
                 let metrics_text = match &last_metrics {
-                    Some(m) => format!("  {}  |  Modelo: {} ({})", m, model_name, provider_name),
+                    Some(m) => format!(
+                        "  {}  |  Modelo: {} ({})",
+                        m, session_info.model, session_info.provider
+                    ),
                     None => format!(
                         "  En espera de primera ejecución...  |  Modelo: {} ({})",
-                        model_name, provider_name
+                        session_info.model, session_info.provider
                     ),
                 };
                 let metrics_widget =
@@ -180,14 +240,63 @@ pub async fn run_tui(
         disable_raw_mode()?;
 
         if let Some(prompt) = user_prompt {
-            println!(
-                "\r{}",
-                style("────────────────────────────────────────").dim()
-            );
-            println!("{}\n", style(format!("❯ {}", prompt)).bold().green());
-            io::stdout().flush()?;
-
-            let _ = input_tx.send(UserInput::Message(prompt));
+            match commands::parse(&prompt) {
+                Command::Message(message) => {
+                    println!(
+                        "\r{}",
+                        style("────────────────────────────────────────").dim()
+                    );
+                    println!("{}\n", style(format!("❯ {}", prompt)).bold().green());
+                    io::stdout().flush()?;
+                    let _ = input_tx.send(UserInput::Message(message));
+                }
+                Command::Help => {
+                    show_info_view("Ayuda", commands::help_text())?;
+                    continue;
+                }
+                Command::Status => {
+                    show_info_view(
+                        "Estado de la sesión",
+                        &commands::status_text(&session_info, last_metrics.as_deref()),
+                    )?;
+                    continue;
+                }
+                Command::Tools => {
+                    show_info_view("Herramientas", commands::tools_text())?;
+                    continue;
+                }
+                Command::Config => {
+                    show_info_view("Configuración", &commands::config_text(&session_info))?;
+                    continue;
+                }
+                Command::Clear => {
+                    crossterm::execute!(io::stdout(), Clear(ClearType::All))?;
+                    continue;
+                }
+                Command::New => {
+                    let _ = input_tx.send(UserInput::ResetConversation);
+                    let message = match event_rx.recv().await {
+                        Some(AgentEvent::SystemMessage(message)) => message,
+                        Some(other) => format!("No se pudo reiniciar la conversación: {:?}", other),
+                        None => {
+                            "No se pudo reiniciar la conversación: el agente terminó.".to_string()
+                        }
+                    };
+                    show_info_view("Conversación nueva", &message)?;
+                    last_metrics = None;
+                    continue;
+                }
+                Command::Exit => {
+                    let _ = input_tx.send(UserInput::Exit);
+                    let _ = agent_handle.await;
+                    println!("Saliendo de Typhon...");
+                    return Ok(());
+                }
+                Command::Unknown(command) => {
+                    show_info_view("Comando no reconocido", &commands::unknown_text(&command))?;
+                    continue;
+                }
+            }
 
             let term_width = crossterm::terminal::size().map(|(w, _)| w).unwrap_or(80);
             let mut stream_processor = MarkdownStreamProcessor::new(term_width);
