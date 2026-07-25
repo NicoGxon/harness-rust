@@ -3,7 +3,7 @@ use crate::provedores::gemini::ProvedorGemini;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use rig::agent::MultiTurnStreamItem;
-use rig::memory::InMemoryConversationMemory;
+use rig::memory::{ConversationMemory, InMemoryConversationMemory};
 use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
 
 /// Error específico del módulo brain.
@@ -16,7 +16,13 @@ pub enum BrainError {
     /// Error de red al listar modelos disponibles.
     #[error("Error al listar modelos: {0}")]
     ListModels(String),
+
+    /// Error al modificar la memoria de la conversación.
+    #[error("Error de memoria: {0}")]
+    Memory(String),
 }
+
+pub const CONVERSATION_ID: &str = "typhon-chat";
 
 /// Identificador de proveedor LLM soportado.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -64,6 +70,7 @@ pub enum StreamChunk {
 /// independientemente de si el backend es Gemini o DeepSeek.
 pub struct BrainWrapper {
     agent: ActiveAgent,
+    memory: InMemoryConversationMemory,
 }
 
 /// Convierte un item del stream multi-turno de `rig` en un [`StreamChunk`] normalizado.
@@ -110,20 +117,28 @@ impl BrainWrapper {
         let agent = match provedor {
             ModeloLLM::Gemini => ActiveAgent::Gemini(ProvedorGemini::new(
                 preamble,
-                memory,
+                memory.clone(),
                 model,
                 api_key,
                 temperature,
             )),
             ModeloLLM::DeepSeek => ActiveAgent::DeepSeek(ProvedorDeepSeek::new(
                 preamble,
-                memory,
+                memory.clone(),
                 model,
                 api_key,
                 temperature,
             )),
         };
-        Self { agent }
+        Self { agent, memory }
+    }
+
+    /// Borra el historial de la conversación activa sin reiniciar el proceso.
+    pub async fn clear_conversation(&self) -> Result<(), BrainError> {
+        self.memory
+            .clear(CONVERSATION_ID)
+            .await
+            .map_err(|error| BrainError::Memory(error.to_string()))
     }
 
     /// Envía un prompt al agente activo y retorna un stream de [`StreamChunk`].

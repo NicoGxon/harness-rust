@@ -35,6 +35,15 @@ impl AgentRunner {
                     self.process_prompt(&prompt, &event_tx, &mut input_rx).await;
                 }
                 UserInput::Cancel => {}
+                UserInput::ResetConversation => {
+                    let message = match self.brain.clear_conversation().await {
+                        Ok(()) => {
+                            "Conversación reiniciada. La memoria del agente está vacía.".to_string()
+                        }
+                        Err(error) => format!("No se pudo reiniciar la conversación: {error}"),
+                    };
+                    let _ = event_tx.send(AgentEvent::SystemMessage(message));
+                }
                 UserInput::Exit => break,
             }
         }

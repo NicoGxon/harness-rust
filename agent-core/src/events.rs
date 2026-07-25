@@ -20,6 +20,8 @@ pub enum AgentEvent {
     Error(String),
     /// El procesamiento fue cancelado por el usuario.
     Cancelled,
+    /// Mensaje local producido por una orden de la interfaz.
+    SystemMessage(String),
     /// El agente finalizó el procesamiento de un prompt.
     StreamEnd {
         duration: Duration,
@@ -35,6 +37,8 @@ pub enum UserInput {
     Message(String),
     /// Solicitud de cancelación del procesamiento actual.
     Cancel,
+    /// Solicitud para borrar la conversación activa.
+    ResetConversation,
     /// El usuario solicita salir.
     Exit,
 }
