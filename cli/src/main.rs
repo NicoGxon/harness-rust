@@ -44,9 +44,10 @@ async fn main() -> Result<()> {
         current_dir,
         &config.config_path,
         &config.prompt_path,
+        config.verbose,
     );
 
-    tui::run_tui(runner, session_info)
+    tui::run_tui(runner, config, session_info)
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 

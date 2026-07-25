@@ -1,4 +1,4 @@
-use brain::Usage;
+use brain::{AgentSettings, Usage};
 use std::time::Duration;
 
 /// Eventos que el agente emite hacia la capa de UI.
@@ -39,6 +39,8 @@ pub enum UserInput {
     Cancel,
     /// Solicitud para borrar la conversación activa.
     ResetConversation,
+    /// Solicitud para reconstruir el agente sin borrar su memoria.
+    Reconfigure(AgentSettings),
     /// El usuario solicita salir.
     Exit,
 }

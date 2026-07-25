@@ -25,7 +25,7 @@ impl AgentRunner {
     /// Lee mensajes de `input_rx` y emite eventos a `event_tx`.
     /// Soporta cancelación en tiempo real enviando `UserInput::Cancel`.
     pub async fn run(
-        self,
+        mut self,
         mut input_rx: mpsc::UnboundedReceiver<UserInput>,
         event_tx: mpsc::UnboundedSender<AgentEvent>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -44,6 +44,9 @@ impl AgentRunner {
                     };
                     let _ = event_tx.send(AgentEvent::SystemMessage(message));
                 }
+                UserInput::Reconfigure(settings) => {
+                    self.brain.reconfigure(settings);
+                }
                 UserInput::Exit => break,
             }
         }
@@ -52,7 +55,7 @@ impl AgentRunner {
     }
 
     async fn process_prompt(
-        &self,
+        &mut self,
         prompt: &str,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
         input_rx: &mut mpsc::UnboundedReceiver<UserInput>,

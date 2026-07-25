@@ -53,6 +53,32 @@ pub struct InfoModelo {
     pub owned_by: String,
 }
 
+/// Configuración necesaria para reconstruir el agente activo en caliente.
+///
+/// La API key solo vive en memoria y nunca forma parte de la configuración
+/// persistida por el CLI.
+#[derive(Clone)]
+pub struct AgentSettings {
+    pub provider: ModeloLLM,
+    pub model: String,
+    pub preamble: String,
+    pub api_key: String,
+    pub temperature: f64,
+}
+
+impl std::fmt::Debug for AgentSettings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentSettings")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("preamble", &self.preamble)
+            .field("api_key", &"[redacted]")
+            .field("temperature", &self.temperature)
+            .finish()
+    }
+}
+
 /// Fragmento de una respuesta en streaming del LLM.
 #[derive(Debug, Clone)]
 pub enum StreamChunk {
@@ -114,23 +140,39 @@ impl BrainWrapper {
         temperature: f64,
         memory: InMemoryConversationMemory,
     ) -> Self {
-        let agent = match provedor {
+        let settings = AgentSettings {
+            provider: provedor,
+            model: model.to_string(),
+            preamble: preamble.to_string(),
+            api_key: api_key.to_string(),
+            temperature,
+        };
+        let agent = Self::build_agent(&settings, &memory);
+        Self { agent, memory }
+    }
+
+    fn build_agent(settings: &AgentSettings, memory: &InMemoryConversationMemory) -> ActiveAgent {
+        match settings.provider {
             ModeloLLM::Gemini => ActiveAgent::Gemini(ProvedorGemini::new(
-                preamble,
+                &settings.preamble,
                 memory.clone(),
-                model,
-                api_key,
-                temperature,
+                &settings.model,
+                &settings.api_key,
+                settings.temperature,
             )),
             ModeloLLM::DeepSeek => ActiveAgent::DeepSeek(ProvedorDeepSeek::new(
-                preamble,
+                &settings.preamble,
                 memory.clone(),
-                model,
-                api_key,
-                temperature,
+                &settings.model,
+                &settings.api_key,
+                settings.temperature,
             )),
-        };
-        Self { agent, memory }
+        }
+    }
+
+    /// Reemplaza el cliente del proveedor conservando la memoria de conversación.
+    pub fn reconfigure(&mut self, settings: AgentSettings) {
+        self.agent = Self::build_agent(&settings, &self.memory);
     }
 
     /// Borra el historial de la conversación activa sin reiniciar el proceso.

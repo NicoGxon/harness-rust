@@ -1,4 +1,5 @@
 use agent_core::{AgentEvent, AgentRunner, UserInput};
+use brain::AgentSettings;
 use console::style;
 use crossterm::cursor::MoveToPreviousLine;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -17,6 +18,7 @@ use tokio::sync::mpsc;
 use super::commands::{self, Command, SessionInfo};
 use super::input::InputState;
 use super::markdown::MarkdownStreamProcessor;
+use crate::config;
 
 type TuiResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
@@ -77,7 +79,8 @@ fn show_info_view(title: &str, content: &str) -> TuiResult {
 
 pub async fn run_tui(
     runner: AgentRunner,
-    session_info: SessionInfo,
+    mut config: config::TyphonConfig,
+    mut session_info: SessionInfo,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (input_tx, input_rx) = mpsc::unbounded_channel::<UserInput>();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -266,6 +269,32 @@ pub async fn run_tui(
                     continue;
                 }
                 Command::Config => {
+                    if let Some(updated) = config::editar_configuracion(&config).await? {
+                        let settings = AgentSettings {
+                            provider: updated.provider,
+                            model: updated.model.clone(),
+                            preamble: updated.preamble.clone(),
+                            api_key: updated.api_key.clone(),
+                            temperature: updated.temperature,
+                        };
+                        session_info.update(
+                            format!("{}", updated.provider),
+                            updated.model.clone(),
+                            updated.temperature,
+                            updated.verbose,
+                            &updated.config_path,
+                            &updated.prompt_path,
+                        );
+                        config = updated;
+                        let _ = input_tx.send(UserInput::Reconfigure(settings));
+                        show_info_view(
+                            "Configuración actualizada",
+                            &commands::config_text(&session_info),
+                        )?;
+                    }
+                    continue;
+                }
+                Command::ConfigShow => {
                     show_info_view("Configuración", &commands::config_text(&session_info))?;
                     continue;
                 }

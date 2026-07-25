@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
-use brain::ModeloLLM;
+use brain::{BrainWrapper, ModeloLLM};
 use console::style;
-use dialoguer::{Input, Select};
+use dialoguer::{Confirm, Editor, Input, Select};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::env;
 use std::fs;
@@ -126,6 +126,212 @@ async fn cargar_o_crear_config(
     Ok((config_file, prompt_path))
 }
 
+/// Abre el editor interactivo de configuración y retorna una nueva sesión si
+/// el usuario guardó cambios.
+pub async fn editar_configuracion(config: &TyphonConfig) -> Result<Option<TyphonConfig>> {
+    let config_path = config.config_path.clone();
+    let config_dir = config_path
+        .parent()
+        .context("El archivo de configuración no tiene un directorio padre")?
+        .to_path_buf();
+    let content = fs::read_to_string(&config_path)
+        .with_context(|| format!("Error al leer {}", config_path.display()))?;
+    let mut working: ConfigFile = toml::from_str(&content)
+        .with_context(|| format!("Error al deserializar {}", config_path.display()))?;
+    let mut working_api_key = config.api_key.clone();
+    let mut prompt_path = resolver_prompt_path(&config_dir, &working.prompt_file);
+    let mut prompt_content = fs::read_to_string(&prompt_path).with_context(|| {
+        format!(
+            "Error al leer el system prompt desde {}",
+            prompt_path.display()
+        )
+    })?;
+
+    loop {
+        let items = [
+            format!(
+                "Proveedor y modelo ({} / {})",
+                working.provider, working.model
+            ),
+            format!("Temperatura ({:.2})", working.temperature),
+            format!(
+                "Verbose ({})",
+                if working.verbose {
+                    "activado"
+                } else {
+                    "desactivado"
+                }
+            ),
+            "Editar system prompt".to_string(),
+            format!("Archivo del system prompt ({})", working.prompt_file),
+            "Guardar y aplicar".to_string(),
+            "Cancelar".to_string(),
+        ];
+        let selection = Select::new()
+            .with_prompt("Configuración de Typhon")
+            .items(&items)
+            .default(0)
+            .interact()?;
+
+        match selection {
+            0 => {
+                let (provider, model, api_key) = resolver_proveedor_y_modelo(
+                    working.provider,
+                    &working.model,
+                    &working_api_key,
+                    config,
+                )
+                .await?;
+                working.provider = provider;
+                working.model = model;
+                working_api_key = api_key;
+            }
+            1 => {
+                let value: String = Input::new()
+                    .with_prompt("Temperatura (0.0 - 2.0)")
+                    .with_initial_text(format!("{:.2}", working.temperature))
+                    .validate_with(|value: &String| match value.parse::<f64>() {
+                        Ok(number) if (0.0..=2.0).contains(&number) => Ok(()),
+                        _ => Err("Introduce un número entre 0.0 y 2.0"),
+                    })
+                    .interact_text()?;
+                working.temperature = value
+                    .parse()
+                    .context("La temperatura introducida no es válida")?;
+            }
+            2 => {
+                working.verbose = Confirm::new()
+                    .with_prompt("¿Activar mensajes detallados?")
+                    .default(working.verbose)
+                    .interact()?;
+            }
+            3 => {
+                if let Some(edited) = Editor::new().edit(&prompt_content)? {
+                    prompt_content = edited;
+                }
+            }
+            4 => {
+                let new_file: String = Input::new()
+                    .with_prompt("Ruta del system prompt")
+                    .with_initial_text(&working.prompt_file)
+                    .validate_with(|value: &String| {
+                        if value.trim().is_empty() {
+                            Err("La ruta no puede estar vacía")
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .interact_text()?;
+                let new_path = resolver_prompt_path(&config_dir, new_file.trim());
+                if new_path != prompt_path {
+                    if new_path.exists() {
+                        prompt_content = fs::read_to_string(&new_path).with_context(|| {
+                            format!(
+                                "Error al leer el system prompt desde {}",
+                                new_path.display()
+                            )
+                        })?;
+                    }
+                    working.prompt_file = new_file.trim().to_string();
+                    prompt_path = new_path;
+                }
+            }
+            5 => {
+                fs::write(&prompt_path, &prompt_content)
+                    .with_context(|| format!("Error al guardar {}", prompt_path.display()))?;
+                guardar_config(&config_path, &working)?;
+                return Ok(Some(TyphonConfig {
+                    provider: working.provider,
+                    model: working.model,
+                    api_key: working_api_key,
+                    temperature: working.temperature,
+                    preamble: prompt_content,
+                    config_path,
+                    prompt_path,
+                    verbose: working.verbose,
+                }));
+            }
+            _ => return Ok(None),
+        }
+    }
+}
+
+fn resolver_prompt_path(config_dir: &Path, prompt_file: &str) -> PathBuf {
+    if Path::new(prompt_file).is_absolute() {
+        PathBuf::from(prompt_file)
+    } else {
+        config_dir.join(prompt_file)
+    }
+}
+
+fn guardar_config(config_path: &Path, config_file: &ConfigFile) -> Result<()> {
+    let toml_str =
+        toml::to_string_pretty(config_file).context("Error al serializar la configuración")?;
+    fs::write(config_path, toml_str)
+        .with_context(|| format!("Error al guardar {}", config_path.display()))?;
+    Ok(())
+}
+
+async fn resolver_proveedor_y_modelo(
+    current_provider: ModeloLLM,
+    current_model: &str,
+    current_api_key: &str,
+    config: &TyphonConfig,
+) -> Result<(ModeloLLM, String, String)> {
+    let providers: Vec<String> = BrainWrapper::listar_provedores()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let provider_selection = Select::new()
+        .with_prompt("Selecciona el proveedor")
+        .items(&providers)
+        .default(
+            BrainWrapper::listar_provedores()
+                .iter()
+                .position(|provider| *provider == current_provider)
+                .unwrap_or(0),
+        )
+        .interact()?;
+    let provider = BrainWrapper::listar_provedores()[provider_selection];
+    let api_key = if provider == current_provider {
+        current_api_key.to_string()
+    } else if provider == config.provider {
+        config.api_key.clone()
+    } else {
+        resolver_api_key(provider)?
+    };
+    let model = resolver_modelo_con_actual(provider, &api_key, current_model).await?;
+    Ok((provider, model, api_key))
+}
+
+async fn resolver_modelo_con_actual(
+    provider: ModeloLLM,
+    api_key: &str,
+    current_model: &str,
+) -> Result<String> {
+    let modelos = provider
+        .listar_modelos(api_key)
+        .await
+        .with_context(|| format!("Error al consultar modelos de {provider}"))?;
+    if modelos.is_empty() {
+        bail!("No se encontraron modelos disponibles para {provider}.");
+    }
+    let items: Vec<String> = modelos
+        .iter()
+        .map(|model| format!("{} ({})", model.id, style(&model.owned_by).dim()))
+        .collect();
+    let default = modelos
+        .iter()
+        .position(|model| model.id == current_model)
+        .unwrap_or(0);
+    let selection = Select::new()
+        .with_prompt("Selecciona el modelo")
+        .items(&items)
+        .default(default)
+        .interact()?;
+    Ok(modelos[selection].id.clone())
+}
+
 fn resolver_proveedor() -> Result<ModeloLLM> {
     let items = &["DeepSeek", "Gemini"];
     let selection = Select::new()
@@ -205,4 +411,38 @@ async fn resolver_modelo(provider: ModeloLLM, api_key: &str) -> Result<String> {
         .interact()?;
 
     Ok(modelos[selection].id.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_relative_and_absolute_prompt_paths() {
+        let base = Path::new("/tmp/typhon");
+        assert_eq!(
+            resolver_prompt_path(base, "system_prompt.md"),
+            PathBuf::from("/tmp/typhon/system_prompt.md")
+        );
+        assert_eq!(
+            resolver_prompt_path(base, "/etc/typhon-prompt.md"),
+            PathBuf::from("/etc/typhon-prompt.md")
+        );
+    }
+
+    #[test]
+    fn config_file_roundtrips_without_api_key() {
+        let original = ConfigFile {
+            provider: ModeloLLM::Gemini,
+            model: "gemini-test".to_string(),
+            temperature: 0.4,
+            verbose: false,
+            prompt_file: "prompt.md".to_string(),
+        };
+        let serialized = toml::to_string(&original).unwrap();
+        let restored: ConfigFile = toml::from_str(&serialized).unwrap();
+
+        assert_eq!(restored, original);
+        assert!(!serialized.contains("api_key"));
+    }
 }

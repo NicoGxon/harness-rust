@@ -1,7 +1,7 @@
-use serde::Deserialize;
 use rig::{
     agent::Agent, client::CompletionClient, memory::InMemoryConversationMemory, providers::gemini,
 };
+use serde::Deserialize;
 use tools::{CreateFileTool, ListDirTool, ReadFileTool};
 
 pub struct ProvedorGemini {

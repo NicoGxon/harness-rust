@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::tui::markdown::{get_visible_len, MarkdownStreamProcessor};
+    use crate::tui::markdown::{MarkdownStreamProcessor, get_visible_len};
 
     #[test]
     fn test_visible_len() {
@@ -19,7 +19,11 @@ mod tests {
         assert!(processor.write_chunk("---\n").is_ok());
         assert!(processor.write_chunk("- Elemento **negrita**\n").is_ok());
         assert!(processor.write_chunk("> Cita con `código`\n").is_ok());
-        assert!(processor.write_chunk("```rust\nfn main() {}\n```\n").is_ok());
+        assert!(
+            processor
+                .write_chunk("```rust\nfn main() {}\n```\n")
+                .is_ok()
+        );
         assert!(processor.flush_final().is_ok());
     }
 

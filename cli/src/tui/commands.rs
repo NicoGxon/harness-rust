@@ -10,6 +10,7 @@ pub struct SessionInfo {
     pub current_dir: String,
     pub config_path: String,
     pub prompt_path: String,
+    pub verbose: bool,
 }
 
 impl SessionInfo {
@@ -21,6 +22,7 @@ impl SessionInfo {
         current_dir: String,
         config_path: &Path,
         prompt_path: &Path,
+        verbose: bool,
     ) -> Self {
         Self {
             provider,
@@ -30,7 +32,25 @@ impl SessionInfo {
             current_dir,
             config_path: config_path.display().to_string(),
             prompt_path: prompt_path.display().to_string(),
+            verbose,
         }
+    }
+
+    pub fn update(
+        &mut self,
+        provider: String,
+        model: String,
+        temperature: f64,
+        verbose: bool,
+        config_path: &Path,
+        prompt_path: &Path,
+    ) {
+        self.provider = provider;
+        self.model = model;
+        self.temperature = temperature;
+        self.verbose = verbose;
+        self.config_path = config_path.display().to_string();
+        self.prompt_path = prompt_path.display().to_string();
     }
 }
 
@@ -41,6 +61,7 @@ pub enum Command {
     Status,
     Tools,
     Config,
+    ConfigShow,
     Clear,
     New,
     Exit,
@@ -60,18 +81,25 @@ pub fn parse(input: &str) -> Command {
         return Command::Message(trimmed[1..].to_string());
     }
 
-    let mut parts = trimmed.split_whitespace();
-    let name = parts.next().unwrap_or_default().to_ascii_lowercase();
-    let has_arguments = parts.next().is_some();
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    let name = parts
+        .first()
+        .copied()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let arguments = &parts[1..];
 
     match name.as_str() {
-        "/help" | "/?" if !has_arguments => Command::Help,
-        "/status" if !has_arguments => Command::Status,
-        "/tools" if !has_arguments => Command::Tools,
-        "/config" if !has_arguments => Command::Config,
-        "/clear" if !has_arguments => Command::Clear,
-        "/new" if !has_arguments => Command::New,
-        "/exit" | "/quit" if !has_arguments => Command::Exit,
+        "/help" | "/?" if arguments.is_empty() => Command::Help,
+        "/status" if arguments.is_empty() => Command::Status,
+        "/tools" if arguments.is_empty() => Command::Tools,
+        "/config" if arguments.is_empty() => Command::Config,
+        "/config" if arguments.len() == 1 && arguments[0].eq_ignore_ascii_case("show") => {
+            Command::ConfigShow
+        }
+        "/clear" if arguments.is_empty() => Command::Clear,
+        "/new" if arguments.is_empty() => Command::New,
+        "/exit" | "/quit" if arguments.is_empty() => Command::Exit,
         _ => Command::Unknown(trimmed.to_string()),
     }
 }
@@ -81,7 +109,8 @@ pub fn help_text() -> &'static str {
   /help, /?       Muestra esta ayuda\n\
   /status         Muestra el estado de la sesión\n\
   /tools          Lista las herramientas disponibles\n\
-  /config         Muestra las rutas y configuración no sensible\n\
+  /config         Abre el editor interactivo de configuración\n\
+  /config show    Muestra la configuración actual\n\
   /clear          Limpia la pantalla\n\
   /new            Inicia una conversación nueva\n\
   /exit, /quit    Sale de Typhon\n\
@@ -98,8 +127,17 @@ pub fn status_text(info: &SessionInfo, last_metrics: Option<&str>) -> String {
 
 pub fn config_text(info: &SessionInfo) -> String {
     format!(
-        "Configuración activa:\n  Archivo de configuración: {}\n  System prompt: {}\n  Proveedor: {}\n  Modelo: {}\n  Temperatura: {:.2}",
-        info.config_path, info.prompt_path, info.provider, info.model, info.temperature
+        "Configuración activa:\n  Archivo de configuración: {}\n  System prompt: {}\n  Proveedor: {}\n  Modelo: {}\n  Temperatura: {:.2}\n  Verbose: {}",
+        info.config_path,
+        info.prompt_path,
+        info.provider,
+        info.model,
+        info.temperature,
+        if info.verbose {
+            "activado"
+        } else {
+            "desactivado"
+        }
     )
 }
 
@@ -139,6 +177,20 @@ mod tests {
         assert_eq!(
             parse("/status ahora"),
             Command::Unknown("/status ahora".into())
+        );
+        assert_eq!(
+            parse("/config otra-cosa"),
+            Command::Unknown("/config otra-cosa".into())
+        );
+    }
+
+    #[test]
+    fn parses_interactive_and_read_only_config_commands() {
+        assert_eq!(parse("/config"), Command::Config);
+        assert_eq!(parse("/CONFIG SHOW"), Command::ConfigShow);
+        assert_eq!(
+            parse("/config show ahora"),
+            Command::Unknown("/config show ahora".into())
         );
     }
 
