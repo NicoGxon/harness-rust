@@ -1,3 +1,4 @@
+use brain::Usage;
 use std::path::Path;
 
 /// Información no sensible de la sesión que se muestra en `/status` y `/config`.
@@ -117,11 +118,26 @@ pub fn help_text() -> &'static str {
   //texto         Envía literalmente un prompt que empieza por /"
 }
 
-pub fn status_text(info: &SessionInfo, last_metrics: Option<&str>) -> String {
-    let metrics = last_metrics.unwrap_or("Sin ejecuciones todavía");
+pub fn status_text(info: &SessionInfo, session_usage: &Usage) -> String {
     format!(
-        "Estado de Typhon:\n  Proveedor: {}\n  Modelo: {}\n  Temperatura: {:.2}\n  Máximo de turnos: {}\n  Directorio: {}\n  Última ejecución: {}",
-        info.provider, info.model, info.temperature, info.max_turns, info.current_dir, metrics
+        "Estado de Typhon:\n  Proveedor: {}\n  Modelo: {}\n  Temperatura: {:.2}\n  Máximo de turnos: {}\n  Directorio: {}\n  Consumo de la conversación: {}",
+        info.provider,
+        info.model,
+        info.temperature,
+        info.max_turns,
+        info.current_dir,
+        session_usage_text(session_usage)
+    )
+}
+
+pub fn session_usage_text(usage: &Usage) -> String {
+    if !usage.has_values() {
+        return "Sin tokens reportados todavía".to_string();
+    }
+
+    format!(
+        "Tokens: {} entrada / {} salida / {} total",
+        usage.input_tokens, usage.output_tokens, usage.total_tokens
     )
 }
 
@@ -197,5 +213,22 @@ mod tests {
     #[test]
     fn reports_unknown_commands() {
         assert_eq!(parse("/wat"), Command::Unknown("/wat".into()));
+    }
+
+    #[test]
+    fn formats_session_usage_with_the_requested_breakdown() {
+        assert_eq!(
+            session_usage_text(&Usage {
+                input_tokens: 120,
+                output_tokens: 30,
+                total_tokens: 150,
+                ..Usage::default()
+            }),
+            "Tokens: 120 entrada / 30 salida / 150 total"
+        );
+        assert_eq!(
+            session_usage_text(&Usage::default()),
+            "Sin tokens reportados todavía"
+        );
     }
 }

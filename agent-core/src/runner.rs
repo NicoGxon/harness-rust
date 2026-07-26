@@ -10,6 +10,7 @@ pub struct AgentRunner {
     brain: BrainWrapper,
     max_turns: u32,
     hooks: Vec<Box<dyn ExecutionHook>>,
+    session_usage: Usage,
 }
 
 impl AgentRunner {
@@ -18,6 +19,7 @@ impl AgentRunner {
             brain,
             max_turns,
             hooks,
+            session_usage: Usage::default(),
         }
     }
 
@@ -38,6 +40,7 @@ impl AgentRunner {
                 UserInput::ResetConversation => {
                     let message = match self.brain.clear_conversation().await {
                         Ok(()) => {
+                            self.session_usage = Usage::default();
                             "Conversación reiniciada. La memoria del agente está vacía.".to_string()
                         }
                         Err(error) => format!("No se pudo reiniciar la conversación: {error}"),
@@ -92,8 +95,12 @@ impl AgentRunner {
                                     let _ = event_tx.send(AgentEvent::Reasoning(reasoning));
                                 }
                                 Some(Ok(StreamChunk::Usage(usage))) => {
-                                    token_usage = usage.clone();
+                                    add_usage(&mut token_usage, &usage);
+                                    add_usage(&mut self.session_usage, &usage);
                                     let _ = event_tx.send(AgentEvent::Usage(usage));
+                                    let _ = event_tx.send(AgentEvent::SessionUsage(
+                                        self.session_usage,
+                                    ));
                                 }
                                 Some(Err(e)) => {
                                     let _ = event_tx.send(AgentEvent::Error(e.to_string()));
@@ -119,12 +126,77 @@ impl AgentRunner {
                 let _ = event_tx.send(AgentEvent::StreamEnd {
                     duration,
                     response_len: full_response.len(),
-                    usage: token_usage,
+                    usage: self.session_usage,
                 });
             }
             Err(e) => {
                 let _ = event_tx.send(AgentEvent::Error(format!("Error al iniciar stream: {}", e)));
             }
         }
+    }
+}
+
+fn add_usage(accumulator: &mut Usage, usage: &Usage) {
+    accumulator.input_tokens = accumulator.input_tokens.saturating_add(usage.input_tokens);
+    accumulator.output_tokens = accumulator
+        .output_tokens
+        .saturating_add(usage.output_tokens);
+    accumulator.cached_input_tokens = accumulator
+        .cached_input_tokens
+        .saturating_add(usage.cached_input_tokens);
+    accumulator.cache_creation_input_tokens = accumulator
+        .cache_creation_input_tokens
+        .saturating_add(usage.cache_creation_input_tokens);
+    accumulator.tool_use_prompt_tokens = accumulator
+        .tool_use_prompt_tokens
+        .saturating_add(usage.tool_use_prompt_tokens);
+    accumulator.reasoning_tokens = accumulator
+        .reasoning_tokens
+        .saturating_add(usage.reasoning_tokens);
+
+    let total = if usage.total_tokens > 0 {
+        usage.total_tokens
+    } else {
+        usage.input_tokens.saturating_add(usage.output_tokens)
+    };
+    accumulator.total_tokens = accumulator.total_tokens.saturating_add(total);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accumulates_all_usage_fields_and_falls_back_to_input_plus_output() {
+        let mut accumulated = Usage::default();
+        let first = Usage {
+            input_tokens: 10,
+            output_tokens: 4,
+            total_tokens: 0,
+            cached_input_tokens: 2,
+            cache_creation_input_tokens: 1,
+            tool_use_prompt_tokens: 3,
+            reasoning_tokens: 5,
+        };
+        let second = Usage {
+            input_tokens: 20,
+            output_tokens: 8,
+            total_tokens: 35,
+            cached_input_tokens: 4,
+            cache_creation_input_tokens: 2,
+            tool_use_prompt_tokens: 6,
+            reasoning_tokens: 7,
+        };
+
+        add_usage(&mut accumulated, &first);
+        add_usage(&mut accumulated, &second);
+
+        assert_eq!(accumulated.input_tokens, 30);
+        assert_eq!(accumulated.output_tokens, 12);
+        assert_eq!(accumulated.total_tokens, 49);
+        assert_eq!(accumulated.cached_input_tokens, 6);
+        assert_eq!(accumulated.cache_creation_input_tokens, 3);
+        assert_eq!(accumulated.tool_use_prompt_tokens, 9);
+        assert_eq!(accumulated.reasoning_tokens, 12);
     }
 }

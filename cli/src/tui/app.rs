@@ -1,5 +1,5 @@
 use agent_core::{AgentEvent, AgentRunner, UserInput};
-use brain::AgentSettings;
+use brain::{AgentSettings, Usage};
 use console::style;
 use crossterm::cursor::MoveToPreviousLine;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -89,7 +89,7 @@ pub async fn run_tui(
     let agent_handle = tokio::spawn(async move { runner.run(input_rx, event_tx).await });
 
     let mut input_state = InputState::new();
-    let mut last_metrics: Option<String> = None;
+    let mut session_usage = Usage::default();
 
     loop {
         // Habilitar raw mode para interactuar con la caja inline de Ratatui
@@ -143,16 +143,12 @@ pub async fn run_tui(
                     .block(Block::default().borders(Borders::TOP | Borders::BOTTOM));
                 frame.render_widget(input_widget, chunks[0]);
 
-                let metrics_text = match &last_metrics {
-                    Some(m) => format!(
-                        "  {}  |  Modelo: {} ({})",
-                        m, session_info.model, session_info.provider
-                    ),
-                    None => format!(
-                        "  En espera de primera ejecución...  |  Modelo: {} ({})",
-                        session_info.model, session_info.provider
-                    ),
-                };
+                let metrics_text = format!(
+                    "  {}  |  Modelo: {} ({})",
+                    commands::session_usage_text(&session_usage),
+                    session_info.model,
+                    session_info.provider
+                );
                 let metrics_widget =
                     Paragraph::new(metrics_text).style(Style::default().fg(Color::DarkGray));
                 frame.render_widget(metrics_widget, chunks[1]);
@@ -260,7 +256,7 @@ pub async fn run_tui(
                 Command::Status => {
                     show_info_view(
                         "Estado de la sesión",
-                        &commands::status_text(&session_info, last_metrics.as_deref()),
+                        &commands::status_text(&session_info, &session_usage),
                     )?;
                     continue;
                 }
@@ -312,7 +308,7 @@ pub async fn run_tui(
                         }
                     };
                     show_info_view("Conversación nueva", &message)?;
-                    last_metrics = None;
+                    session_usage = Usage::default();
                     continue;
                 }
                 Command::Exit => {
@@ -339,33 +335,18 @@ pub async fn run_tui(
                     AgentEvent::Reasoning(t) => {
                         let _ = stream_processor.write_reasoning_chunk(&t);
                     }
+                    AgentEvent::SessionUsage(usage) => {
+                        session_usage = usage;
+                    }
                     AgentEvent::Error(err) => {
                         let _ = stream_processor.flush_final();
                         println!("\nError: {}", err);
                         break;
                     }
-                    AgentEvent::StreamEnd {
-                        duration,
-                        response_len,
-                        usage,
-                    } => {
+                    AgentEvent::StreamEnd { usage, .. } => {
                         let _ = stream_processor.flush_final();
                         println!();
-                        let metrics_str = if usage.total_tokens > 0 {
-                            format!(
-                                "Tiempo: {:.2?} | Tokens: {} inp / {} out ({} total)",
-                                duration,
-                                usage.input_tokens,
-                                usage.output_tokens,
-                                usage.total_tokens
-                            )
-                        } else {
-                            format!(
-                                "Tiempo: {:.2?} | Respuesta: {} caracteres",
-                                duration, response_len
-                            )
-                        };
-                        last_metrics = Some(metrics_str);
+                        session_usage = usage;
                         break;
                     }
                     _ => {}

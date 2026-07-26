@@ -14,8 +14,10 @@ pub enum AgentEvent {
     ToolStart { name: String, input: String },
     /// Resultado de la ejecución de una herramienta.
     ToolResult { name: String, output: String },
-    /// Información de uso de tokens reportada por el modelo.
+    /// Información de uso de tokens reportada por una llamada del modelo.
     Usage(Usage),
+    /// Uso de tokens acumulado de la conversación activa.
+    SessionUsage(Usage),
     /// Error ocurrido durante el procesamiento.
     Error(String),
     /// El procesamiento fue cancelado por el usuario.
@@ -26,6 +28,7 @@ pub enum AgentEvent {
     StreamEnd {
         duration: Duration,
         response_len: usize,
+        /// Uso acumulado de la conversación activa.
         usage: Usage,
     },
 }
