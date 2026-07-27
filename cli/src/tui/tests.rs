@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+mod tests_cli {
     use crate::tui::markdown::{MarkdownStreamProcessor, get_visible_len};
 
     #[test]
