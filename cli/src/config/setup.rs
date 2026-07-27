@@ -132,146 +132,201 @@ async fn cargar_o_crear_config(
     Ok((config_file, prompt_path))
 }
 
-/// Abre el editor interactivo de configuración y retorna una nueva sesión si
-/// el usuario guardó cambios.
-pub async fn editar_configuracion(config: &TyphonConfig) -> Result<Option<TyphonConfig>> {
-    let config_path = config.config_path.clone();
+/// Configura el proveedor y, a continuación, selecciona un modelo compatible.
+pub async fn configurar_proveedor(config: &TyphonConfig) -> Result<Option<TyphonConfig>> {
+    let (config_path, mut working) = cargar_configuracion(config)?;
     let config_dir = config_path
         .parent()
-        .context("El archivo de configuración no tiene un directorio padre")?
-        .to_path_buf();
+        .context("El archivo de configuración no tiene un directorio padre")?;
+    let (provider, model, credential) =
+        resolver_proveedor_y_modelo(working.provider, &working.model, &config.credential, config)
+            .await?;
+    working.provider = provider;
+    working.model = model;
+    if !proveedor_admite_razonamiento(provider) {
+        working.reasoning_effort = None;
+    }
+
+    let prompt_path = resolver_prompt_path(config_dir, &working.prompt_file);
+    let preamble = leer_prompt(&prompt_path)?;
+    guardar_configuracion(config_path, working, credential, preamble, prompt_path)
+}
+
+/// Selecciona otro modelo del proveedor activo.
+pub async fn configurar_modelo(config: &TyphonConfig) -> Result<Option<TyphonConfig>> {
+    let (config_path, mut working) = cargar_configuracion(config)?;
+    let model =
+        resolver_modelo_con_actual(config.provider, &config.credential, &working.model).await?;
+    working.model = model;
+    let prompt_path = resolver_prompt_path(
+        config_path
+            .parent()
+            .context("El archivo de configuración no tiene un directorio padre")?,
+        &working.prompt_file,
+    );
+    let preamble = leer_prompt(&prompt_path)?;
+    guardar_configuracion(
+        config_path,
+        working,
+        config.credential.clone(),
+        preamble,
+        prompt_path,
+    )
+}
+
+/// Solicita una temperatura válida y la aplica inmediatamente.
+pub fn configurar_temperatura(config: &TyphonConfig) -> Result<Option<TyphonConfig>> {
+    let (config_path, mut working) = cargar_configuracion(config)?;
+    let value: String = Input::new()
+        .with_prompt("Temperatura (0.0 - 2.0)")
+        .with_initial_text(format!("{:.2}", working.temperature))
+        .validate_with(|value: &String| match value.parse::<f64>() {
+            Ok(number) if (0.0..=2.0).contains(&number) => Ok(()),
+            _ => Err("Introduce un número entre 0.0 y 2.0"),
+        })
+        .interact_text()?;
+    working.temperature = value
+        .parse()
+        .context("La temperatura introducida no es válida")?;
+    guardar_configuracion_actual(config_path, working, config)
+}
+
+/// Selecciona el nivel de razonamiento del proveedor activo.
+pub fn configurar_razonamiento(config: &TyphonConfig) -> Result<Option<TyphonConfig>> {
+    if !proveedor_admite_razonamiento(config.provider) {
+        bail!(
+            "El proveedor {} no admite niveles de razonamiento",
+            config.provider
+        );
+    }
+
+    let (config_path, mut working) = cargar_configuracion(config)?;
+    working.reasoning_effort =
+        resolver_nivel_razonamiento(working.provider, working.reasoning_effort)?;
+    guardar_configuracion_actual(config_path, working, config)
+}
+
+/// Activa o desactiva los mensajes detallados.
+pub fn configurar_verbose(config: &TyphonConfig) -> Result<Option<TyphonConfig>> {
+    let (config_path, mut working) = cargar_configuracion(config)?;
+    working.verbose = Confirm::new()
+        .with_prompt("¿Activar mensajes detallados?")
+        .default(working.verbose)
+        .interact()?;
+    guardar_configuracion_actual(config_path, working, config)
+}
+
+/// Edita el contenido del system prompt y lo aplica al agente.
+pub fn configurar_prompt(config: &TyphonConfig) -> Result<Option<TyphonConfig>> {
+    let prompt_content = leer_prompt(&config.prompt_path)?;
+    let Some(edited) = Editor::new().edit(&prompt_content)? else {
+        return Ok(None);
+    };
+
+    fs::write(&config.prompt_path, &edited)
+        .with_context(|| format!("Error al guardar {}", config.prompt_path.display()))?;
+    let (config_path, working) = cargar_configuracion(config)?;
+    guardar_configuracion(
+        config_path,
+        working,
+        config.credential.clone(),
+        edited,
+        config.prompt_path.clone(),
+    )
+}
+
+/// Cambia el archivo del system prompt y crea el nuevo archivo si no existe.
+pub fn configurar_prompt_file(config: &TyphonConfig) -> Result<Option<TyphonConfig>> {
+    let (config_path, mut working) = cargar_configuracion(config)?;
+    let config_dir = config_path
+        .parent()
+        .context("El archivo de configuración no tiene un directorio padre")?;
+    let current_path = resolver_prompt_path(config_dir, &working.prompt_file);
+    let current_content = leer_prompt(&current_path)?;
+    let new_file: String = Input::new()
+        .with_prompt("Ruta del system prompt")
+        .with_initial_text(&working.prompt_file)
+        .validate_with(|value: &String| {
+            if value.trim().is_empty() {
+                Err("La ruta no puede estar vacía")
+            } else {
+                Ok(())
+            }
+        })
+        .interact_text()?;
+    let new_file = new_file.trim().to_string();
+    let new_path = resolver_prompt_path(config_dir, &new_file);
+    let new_content = if new_path.exists() {
+        leer_prompt(&new_path)?
+    } else {
+        fs::write(&new_path, &current_content)
+            .with_context(|| format!("Error al crear {}", new_path.display()))?;
+        current_content
+    };
+
+    working.prompt_file = new_file;
+    guardar_configuracion(
+        config_path,
+        working,
+        config.credential.clone(),
+        new_content,
+        new_path,
+    )
+}
+
+fn cargar_configuracion(config: &TyphonConfig) -> Result<(PathBuf, ConfigFile)> {
+    let config_path = config.config_path.clone();
     let content = fs::read_to_string(&config_path)
         .with_context(|| format!("Error al leer {}", config_path.display()))?;
-    let mut working: ConfigFile = toml::from_str(&content)
+    let working = toml::from_str(&content)
         .with_context(|| format!("Error al deserializar {}", config_path.display()))?;
-    let mut working_credential = config.credential.clone();
-    let mut prompt_path = resolver_prompt_path(&config_dir, &working.prompt_file);
-    let mut prompt_content = fs::read_to_string(&prompt_path).with_context(|| {
+    Ok((config_path, working))
+}
+
+fn leer_prompt(prompt_path: &Path) -> Result<String> {
+    fs::read_to_string(prompt_path).with_context(|| {
         format!(
             "Error al leer el system prompt desde {}",
             prompt_path.display()
         )
-    })?;
+    })
+}
 
-    loop {
-        let items = [
-            format!(
-                "Proveedor y modelo ({} / {})",
-                working.provider, working.model
-            ),
-            format!("Temperatura ({:.2})", working.temperature),
-            format!(
-                "Nivel de razonamiento ({})",
-                formato_nivel_razonamiento(working.provider, working.reasoning_effort)
-            ),
-            format!(
-                "Verbose ({})",
-                if working.verbose {
-                    "activado"
-                } else {
-                    "desactivado"
-                }
-            ),
-            "Editar system prompt".to_string(),
-            format!("Archivo del system prompt ({})", working.prompt_file),
-            "Guardar y aplicar".to_string(),
-            "Cancelar".to_string(),
-        ];
-        let selection = Select::new()
-            .with_prompt("Configuración de Typhon")
-            .items(&items)
-            .default(0)
-            .interact()?;
+fn guardar_configuracion_actual(
+    config_path: PathBuf,
+    working: ConfigFile,
+    config: &TyphonConfig,
+) -> Result<Option<TyphonConfig>> {
+    let prompt_path = config.prompt_path.clone();
+    let preamble = leer_prompt(&prompt_path)?;
+    guardar_configuracion(
+        config_path,
+        working,
+        config.credential.clone(),
+        preamble,
+        prompt_path,
+    )
+}
 
-        match selection {
-            0 => {
-                let (provider, model, credential) = resolver_proveedor_y_modelo(
-                    working.provider,
-                    &working.model,
-                    &working_credential,
-                    config,
-                )
-                .await?;
-                working.provider = provider;
-                working.model = model;
-                working_credential = credential;
-                if !proveedor_admite_razonamiento(provider) {
-                    working.reasoning_effort = None;
-                }
-            }
-            1 => {
-                let value: String = Input::new()
-                    .with_prompt("Temperatura (0.0 - 2.0)")
-                    .with_initial_text(format!("{:.2}", working.temperature))
-                    .validate_with(|value: &String| match value.parse::<f64>() {
-                        Ok(number) if (0.0..=2.0).contains(&number) => Ok(()),
-                        _ => Err("Introduce un número entre 0.0 y 2.0"),
-                    })
-                    .interact_text()?;
-                working.temperature = value
-                    .parse()
-                    .context("La temperatura introducida no es válida")?;
-            }
-            2 => {
-                working.reasoning_effort =
-                    resolver_nivel_razonamiento(working.provider, working.reasoning_effort)?;
-            }
-            3 => {
-                working.verbose = Confirm::new()
-                    .with_prompt("¿Activar mensajes detallados?")
-                    .default(working.verbose)
-                    .interact()?;
-            }
-            4 => {
-                if let Some(edited) = Editor::new().edit(&prompt_content)? {
-                    prompt_content = edited;
-                }
-            }
-            5 => {
-                let new_file: String = Input::new()
-                    .with_prompt("Ruta del system prompt")
-                    .with_initial_text(&working.prompt_file)
-                    .validate_with(|value: &String| {
-                        if value.trim().is_empty() {
-                            Err("La ruta no puede estar vacía")
-                        } else {
-                            Ok(())
-                        }
-                    })
-                    .interact_text()?;
-                let new_path = resolver_prompt_path(&config_dir, new_file.trim());
-                if new_path != prompt_path {
-                    if new_path.exists() {
-                        prompt_content = fs::read_to_string(&new_path).with_context(|| {
-                            format!(
-                                "Error al leer el system prompt desde {}",
-                                new_path.display()
-                            )
-                        })?;
-                    }
-                    working.prompt_file = new_file.trim().to_string();
-                    prompt_path = new_path;
-                }
-            }
-            6 => {
-                fs::write(&prompt_path, &prompt_content)
-                    .with_context(|| format!("Error al guardar {}", prompt_path.display()))?;
-                guardar_config(&config_path, &working)?;
-                return Ok(Some(TyphonConfig {
-                    provider: working.provider,
-                    model: working.model,
-                    credential: working_credential,
-                    temperature: working.temperature,
-                    reasoning_effort: working.reasoning_effort,
-                    preamble: prompt_content,
-                    config_path,
-                    prompt_path,
-                    verbose: working.verbose,
-                }));
-            }
-            _ => return Ok(None),
-        }
-    }
+fn guardar_configuracion(
+    config_path: PathBuf,
+    working: ConfigFile,
+    credential: ProviderCredential,
+    preamble: String,
+    prompt_path: PathBuf,
+) -> Result<Option<TyphonConfig>> {
+    guardar_config(&config_path, &working)?;
+    Ok(Some(TyphonConfig {
+        provider: working.provider,
+        model: working.model,
+        credential,
+        temperature: working.temperature,
+        reasoning_effort: working.reasoning_effort,
+        preamble,
+        config_path,
+        prompt_path,
+        verbose: working.verbose,
+    }))
 }
 
 fn resolver_prompt_path(config_dir: &Path, prompt_file: &str) -> PathBuf {
@@ -284,18 +339,6 @@ fn resolver_prompt_path(config_dir: &Path, prompt_file: &str) -> PathBuf {
 
 fn proveedor_admite_razonamiento(provider: ModeloLLM) -> bool {
     matches!(provider, ModeloLLM::OpenAI | ModeloLLM::ChatGPT)
-}
-
-fn formato_nivel_razonamiento(
-    provider: ModeloLLM,
-    reasoning_effort: Option<ReasoningEffort>,
-) -> String {
-    if !proveedor_admite_razonamiento(provider) {
-        return "no aplica".to_string();
-    }
-    reasoning_effort
-        .map(|effort| effort.to_string())
-        .unwrap_or_else(|| "automático".to_string())
 }
 
 fn resolver_nivel_razonamiento(
@@ -603,5 +646,13 @@ mod tests {
         assert!(serialized.contains("reasoning_effort = \"high\""));
         let restored: ConfigFile = toml::from_str(&serialized).unwrap();
         assert_eq!(restored.reasoning_effort, Some(ReasoningEffort::High));
+    }
+
+    #[test]
+    fn reasoning_is_supported_only_by_openai_providers() {
+        assert!(proveedor_admite_razonamiento(ModeloLLM::OpenAI));
+        assert!(proveedor_admite_razonamiento(ModeloLLM::ChatGPT));
+        assert!(!proveedor_admite_razonamiento(ModeloLLM::Gemini));
+        assert!(!proveedor_admite_razonamiento(ModeloLLM::DeepSeek));
     }
 }

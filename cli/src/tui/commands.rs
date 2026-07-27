@@ -67,7 +67,13 @@ pub enum Command {
     Status,
     Tools,
     Config,
-    ConfigShow,
+    Provider,
+    Model,
+    Temperature,
+    Reasoning,
+    Verbose,
+    Prompt,
+    PromptFile,
     Clear,
     New,
     Exit,
@@ -100,9 +106,13 @@ pub fn parse(input: &str) -> Command {
         "/status" if arguments.is_empty() => Command::Status,
         "/tools" if arguments.is_empty() => Command::Tools,
         "/config" if arguments.is_empty() => Command::Config,
-        "/config" if arguments.len() == 1 && arguments[0].eq_ignore_ascii_case("show") => {
-            Command::ConfigShow
-        }
+        "/provider" if arguments.is_empty() => Command::Provider,
+        "/model" if arguments.is_empty() => Command::Model,
+        "/temperature" if arguments.is_empty() => Command::Temperature,
+        "/reasoning" if arguments.is_empty() => Command::Reasoning,
+        "/verbose" if arguments.is_empty() => Command::Verbose,
+        "/prompt" if arguments.is_empty() => Command::Prompt,
+        "/prompt-file" if arguments.is_empty() => Command::PromptFile,
         "/clear" if arguments.is_empty() => Command::Clear,
         "/new" if arguments.is_empty() => Command::New,
         "/exit" | "/quit" if arguments.is_empty() => Command::Exit,
@@ -115,8 +125,14 @@ pub fn help_text() -> &'static str {
   /help, /?       Muestra esta ayuda\n\
   /status         Muestra el estado de la sesión\n\
   /tools          Lista las herramientas disponibles\n\
-  /config         Abre el editor interactivo de configuración\n\
-  /config show    Muestra la configuración actual\n\
+  /config         Muestra la configuración actual\n\
+  /provider       Cambia el proveedor y el modelo\n\
+  /model          Cambia el modelo del proveedor activo\n\
+  /temperature    Cambia la temperatura\n\
+  /reasoning      Cambia el nivel de razonamiento\n\
+  /verbose        Activa o desactiva los mensajes detallados\n\
+  /prompt         Edita el system prompt\n\
+  /prompt-file    Cambia el archivo del system prompt\n\
   /clear          Limpia la pantalla\n\
   /new            Inicia una conversación nueva\n\
   /exit, /quit    Sale de Typhon\n\
@@ -221,13 +237,45 @@ mod tests {
     }
 
     #[test]
-    fn parses_interactive_and_read_only_config_commands() {
+    fn parses_config_commands_without_arguments() {
         assert_eq!(parse("/config"), Command::Config);
-        assert_eq!(parse("/CONFIG SHOW"), Command::ConfigShow);
+        assert_eq!(parse("/PROVIDER"), Command::Provider);
+        assert_eq!(parse("/model"), Command::Model);
+        assert_eq!(parse("/TEMPERATURE"), Command::Temperature);
+        assert_eq!(parse("/reasoning"), Command::Reasoning);
+        assert_eq!(parse("/verbose"), Command::Verbose);
+        assert_eq!(parse("/prompt"), Command::Prompt);
+        assert_eq!(parse("/PROMPT-FILE"), Command::PromptFile);
+    }
+
+    #[test]
+    fn rejects_arguments_for_config_commands() {
         assert_eq!(
-            parse("/config show ahora"),
-            Command::Unknown("/config show ahora".into())
+            parse("/config show"),
+            Command::Unknown("/config show".into())
         );
+        assert_eq!(
+            parse("/temperature 0.7"),
+            Command::Unknown("/temperature 0.7".into())
+        );
+    }
+
+    #[test]
+    fn documents_each_config_command() {
+        let help = help_text();
+        for command in [
+            "/config",
+            "/provider",
+            "/model",
+            "/temperature",
+            "/reasoning",
+            "/verbose",
+            "/prompt",
+            "/prompt-file",
+        ] {
+            assert!(help.contains(command), "falta {command} en la ayuda");
+        }
+        assert!(!help.contains("/config show"));
     }
 
     #[test]

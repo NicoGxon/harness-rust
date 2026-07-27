@@ -77,6 +77,47 @@ fn show_info_view(title: &str, content: &str) -> TuiResult {
     result
 }
 
+fn aplicar_configuracion(
+    result: anyhow::Result<Option<config::TyphonConfig>>,
+    config: &mut config::TyphonConfig,
+    session_info: &mut SessionInfo,
+    input_tx: &mpsc::UnboundedSender<UserInput>,
+) -> TuiResult {
+    match result {
+        Ok(Some(updated)) => {
+            let settings = AgentSettings {
+                provider: updated.provider,
+                model: updated.model.clone(),
+                preamble: updated.preamble.clone(),
+                credential: updated.credential.clone(),
+                temperature: updated.temperature,
+                reasoning_effort: updated.reasoning_effort,
+            };
+            session_info.update(
+                format!("{}", updated.provider),
+                updated.model.clone(),
+                updated.temperature,
+                updated.reasoning_effort,
+                updated.verbose,
+                &updated.config_path,
+                &updated.prompt_path,
+            );
+            *config = updated;
+            let _ = input_tx.send(UserInput::Reconfigure(settings));
+            show_info_view(
+                "Configuración actualizada",
+                &commands::config_text(session_info),
+            )?;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            show_info_view("Error de configuración", &error.to_string())?;
+        }
+    }
+
+    Ok(())
+}
+
 pub async fn run_tui(
     runner: AgentRunner,
     mut config: config::TyphonConfig,
@@ -265,35 +306,70 @@ pub async fn run_tui(
                     continue;
                 }
                 Command::Config => {
-                    if let Some(updated) = config::editar_configuracion(&config).await? {
-                        let settings = AgentSettings {
-                            provider: updated.provider,
-                            model: updated.model.clone(),
-                            preamble: updated.preamble.clone(),
-                            credential: updated.credential.clone(),
-                            temperature: updated.temperature,
-                            reasoning_effort: updated.reasoning_effort,
-                        };
-                        session_info.update(
-                            format!("{}", updated.provider),
-                            updated.model.clone(),
-                            updated.temperature,
-                            updated.reasoning_effort,
-                            updated.verbose,
-                            &updated.config_path,
-                            &updated.prompt_path,
-                        );
-                        config = updated;
-                        let _ = input_tx.send(UserInput::Reconfigure(settings));
-                        show_info_view(
-                            "Configuración actualizada",
-                            &commands::config_text(&session_info),
-                        )?;
-                    }
+                    show_info_view("Configuración", &commands::config_text(&session_info))?;
                     continue;
                 }
-                Command::ConfigShow => {
-                    show_info_view("Configuración", &commands::config_text(&session_info))?;
+                Command::Provider => {
+                    aplicar_configuracion(
+                        config::configurar_proveedor(&config).await,
+                        &mut config,
+                        &mut session_info,
+                        &input_tx,
+                    )?;
+                    continue;
+                }
+                Command::Model => {
+                    aplicar_configuracion(
+                        config::configurar_modelo(&config).await,
+                        &mut config,
+                        &mut session_info,
+                        &input_tx,
+                    )?;
+                    continue;
+                }
+                Command::Temperature => {
+                    aplicar_configuracion(
+                        config::configurar_temperatura(&config),
+                        &mut config,
+                        &mut session_info,
+                        &input_tx,
+                    )?;
+                    continue;
+                }
+                Command::Reasoning => {
+                    aplicar_configuracion(
+                        config::configurar_razonamiento(&config),
+                        &mut config,
+                        &mut session_info,
+                        &input_tx,
+                    )?;
+                    continue;
+                }
+                Command::Verbose => {
+                    aplicar_configuracion(
+                        config::configurar_verbose(&config),
+                        &mut config,
+                        &mut session_info,
+                        &input_tx,
+                    )?;
+                    continue;
+                }
+                Command::Prompt => {
+                    aplicar_configuracion(
+                        config::configurar_prompt(&config),
+                        &mut config,
+                        &mut session_info,
+                        &input_tx,
+                    )?;
+                    continue;
+                }
+                Command::PromptFile => {
+                    aplicar_configuracion(
+                        config::configurar_prompt_file(&config),
+                        &mut config,
+                        &mut session_info,
+                        &input_tx,
+                    )?;
                     continue;
                 }
                 Command::Clear => {
