@@ -1,3 +1,4 @@
+use crate::provedores::chatgpt::ProvedorChatGPT;
 use crate::provedores::deepseek::ProvedorDeepSeek;
 use crate::provedores::gemini::ProvedorGemini;
 use crate::provedores::openai::{ProvedorOpenAI, ReasoningEffort};
@@ -6,6 +7,7 @@ use futures::stream::BoxStream;
 use rig::agent::MultiTurnStreamItem;
 use rig::memory::{ConversationMemory, InMemoryConversationMemory};
 use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
+use std::path::PathBuf;
 
 /// Error específico del módulo brain.
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +37,7 @@ pub enum ModeloLLM {
     Gemini,
     DeepSeek,
     OpenAI,
+    ChatGPT,
 }
 
 impl std::fmt::Display for ModeloLLM {
@@ -43,6 +46,7 @@ impl std::fmt::Display for ModeloLLM {
             Self::Gemini => write!(f, "Gemini"),
             Self::DeepSeek => write!(f, "DeepSeek"),
             Self::OpenAI => write!(f, "OpenAI API"),
+            Self::ChatGPT => write!(f, "ChatGPT Subscription"),
         }
     }
 }
@@ -53,12 +57,17 @@ impl std::fmt::Display for ModeloLLM {
 #[derive(Clone)]
 pub enum ProviderCredential {
     ApiKey(String),
+    ChatGptOAuth { auth_file: PathBuf },
 }
 
 impl std::fmt::Debug for ProviderCredential {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ApiKey(_) => formatter.write_str("ApiKey(<redacted>)"),
+            Self::ChatGptOAuth { auth_file } => formatter
+                .debug_struct("ChatGptOAuth")
+                .field("auth_file", auth_file)
+                .finish(),
         }
     }
 }
@@ -68,6 +77,7 @@ pub enum ActiveAgent {
     Gemini(ProvedorGemini),
     DeepSeek(ProvedorDeepSeek),
     OpenAI(ProvedorOpenAI),
+    ChatGPT(ProvedorChatGPT),
 }
 
 /// Información normalizada de un modelo LLM, independiente del proveedor.
@@ -157,7 +167,7 @@ impl BrainWrapper {
     /// * `preamble` - System prompt del agente.
     /// * `credential` - API key o sesión OAuth del proveedor.
     /// * `temperature` - Temperatura de generación (0.0 - 2.0).
-    /// * `reasoning_effort` - Nivel opcional de razonamiento para OpenAI.
+    /// * `reasoning_effort` - Nivel opcional de razonamiento para OpenAI y ChatGPT.
     /// * `memory` - Memoria de conversación para contexto multi-turno.
     pub fn new(
         provedor: ModeloLLM,
@@ -217,6 +227,23 @@ impl BrainWrapper {
                 )
                 .map_err(|error| BrainError::Provider(error.to_string()))?,
             ),
+            ModeloLLM::ChatGPT => {
+                let ProviderCredential::ChatGptOAuth { auth_file } = &settings.credential else {
+                    return Err(BrainError::Provider(
+                        "ChatGPT Subscription requiere una sesión OAuth".to_string(),
+                    ));
+                };
+                ActiveAgent::ChatGPT(
+                    ProvedorChatGPT::new(
+                        &settings.preamble,
+                        memory.clone(),
+                        &settings.model,
+                        auth_file,
+                        settings.reasoning_effort,
+                    )
+                    .map_err(|error| BrainError::Provider(error.to_string()))?,
+                )
+            }
         };
         Ok(agent)
     }
@@ -258,6 +285,10 @@ impl BrainWrapper {
                 let stream = o.agent.stream_prompt(prompt).max_turns(max).await;
                 Ok(stream.map(map_stream_item).boxed())
             }
+            ActiveAgent::ChatGPT(c) => {
+                let stream = c.agent.stream_prompt(prompt).max_turns(max).await;
+                Ok(stream.map(map_stream_item).boxed())
+            }
         }
     }
 
@@ -267,6 +298,7 @@ impl BrainWrapper {
             ModeloLLM::Gemini,
             ModeloLLM::DeepSeek,
             ModeloLLM::OpenAI,
+            ModeloLLM::ChatGPT,
         ]
     }
 }
@@ -324,6 +356,23 @@ impl ModeloLLM {
                     .map(|model| InfoModelo {
                         id: model.id,
                         owned_by: model.owned_by,
+                    })
+                    .collect())
+            }
+            ModeloLLM::ChatGPT => {
+                let ProviderCredential::ChatGptOAuth { auth_file } = credential else {
+                    return Err(BrainError::ListModels(
+                        "ChatGPT Subscription requiere una sesión OAuth".to_string(),
+                    ));
+                };
+                let models = ProvedorChatGPT::listar_modelos(auth_file)
+                    .await
+                    .map_err(|e| BrainError::ListModels(e.to_string()))?;
+                Ok(models
+                    .iter()
+                    .map(|model| {
+                        let (id, owned_by) = ProvedorChatGPT::info_modelo(model);
+                        InfoModelo { id, owned_by }
                     })
                     .collect())
             }
@@ -391,6 +440,7 @@ mod tests {
         assert_eq!(format!("{}", ModeloLLM::Gemini), "Gemini");
         assert_eq!(format!("{}", ModeloLLM::DeepSeek), "DeepSeek");
         assert_eq!(format!("{}", ModeloLLM::OpenAI), "OpenAI API");
+        assert_eq!(format!("{}", ModeloLLM::ChatGPT), "ChatGPT Subscription");
     }
 
     #[test]
@@ -465,10 +515,11 @@ mod tests {
     #[test]
     fn test_listar_provedores_contenido() {
         let provs = BrainWrapper::listar_provedores();
-        assert_eq!(provs.len(), 3);
+        assert_eq!(provs.len(), 4);
         assert!(provs.contains(&ModeloLLM::Gemini));
         assert!(provs.contains(&ModeloLLM::DeepSeek));
         assert!(provs.contains(&ModeloLLM::OpenAI));
+        assert!(provs.contains(&ModeloLLM::ChatGPT));
     }
 
     #[test]
@@ -477,6 +528,7 @@ mod tests {
         assert_eq!(provs[0], ModeloLLM::Gemini);
         assert_eq!(provs[1], ModeloLLM::DeepSeek);
         assert_eq!(provs[2], ModeloLLM::OpenAI);
+        assert_eq!(provs[3], ModeloLLM::ChatGPT);
     }
 
     // ── Mapping: Gemini → InfoModelo (strip_prefix logic) ──────────

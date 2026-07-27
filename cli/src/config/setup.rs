@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, bail};
-use brain::{BrainWrapper, ModeloLLM, ProviderCredential, ReasoningEffort};
+use brain::{
+    BrainWrapper, ModeloLLM, ProviderCredential, ReasoningEffort,
+    provedores::chatgpt::ProvedorChatGPT,
+};
 use console::style;
 use dialoguer::{Confirm, Editor, Input, Select};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -280,7 +283,7 @@ fn resolver_prompt_path(config_dir: &Path, prompt_file: &str) -> PathBuf {
 }
 
 fn proveedor_admite_razonamiento(provider: ModeloLLM) -> bool {
-    matches!(provider, ModeloLLM::OpenAI)
+    matches!(provider, ModeloLLM::OpenAI | ModeloLLM::ChatGPT)
 }
 
 fn formato_nivel_razonamiento(
@@ -376,11 +379,24 @@ async fn resolver_modelo_con_actual(
     credential: &ProviderCredential,
     current_model: &str,
 ) -> Result<String> {
-    let modelos = provider
-        .listar_modelos(credential)
-        .await
-        .with_context(|| format!("Error al consultar modelos de {provider}"))?;
+    let modelos = match provider.listar_modelos(credential).await {
+        Ok(modelos) => modelos,
+        Err(error) if provider == ModeloLLM::ChatGPT => {
+            eprintln!(
+                "  [!] No se pudo listar modelos de ChatGPT ({error}). Puedes introducir el slug manualmente."
+            );
+            return resolver_modelo_manual(current_model);
+        }
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "Error al consultar modelos de {provider}: {error}"
+            ));
+        }
+    };
     if modelos.is_empty() {
+        if provider == ModeloLLM::ChatGPT {
+            return resolver_modelo_manual(current_model);
+        }
         bail!("No se encontraron modelos disponibles para {provider}.");
     }
     let items: Vec<String> = modelos
@@ -411,14 +427,30 @@ fn resolver_proveedor() -> Result<ModeloLLM> {
     Ok(providers[selection])
 }
 
-async fn resolver_credencial(
-    provider: ModeloLLM,
-    _config_dir: &Path,
-) -> Result<ProviderCredential> {
+async fn resolver_credencial(provider: ModeloLLM, config_dir: &Path) -> Result<ProviderCredential> {
+    if provider == ModeloLLM::ChatGPT {
+        let auth_file = config_dir.join("chatgpt").join("auth.json");
+        fs::create_dir_all(
+            auth_file
+                .parent()
+                .context("No se pudo crear el directorio de sesión ChatGPT")?,
+        )?;
+        proteger_sesion_chatgpt(auth_file.parent().unwrap_or(config_dir));
+        println!("  [i] Iniciando sesión de ChatGPT...");
+        ProvedorChatGPT::autorizar(&auth_file)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("No se pudo autorizar la suscripción de ChatGPT: {error}")
+            })?;
+        proteger_sesion_chatgpt_file(&auth_file);
+        return Ok(ProviderCredential::ChatGptOAuth { auth_file });
+    }
+
     let env_key_name = match provider {
         ModeloLLM::Gemini => "GEMINI_API_KEY",
         ModeloLLM::DeepSeek => "DEEP_SEEK_API_KEY",
         ModeloLLM::OpenAI => "OPENAI_API_KEY",
+        ModeloLLM::ChatGPT => unreachable!(),
     };
 
     // Intentar desde .env primero
@@ -443,6 +475,20 @@ async fn resolver_credencial(
     Ok(ProviderCredential::ApiKey(key.trim().to_string()))
 }
 
+#[cfg(unix)]
+fn proteger_sesion_chatgpt(directory: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(directory, fs::Permissions::from_mode(0o700));
+}
+
+#[cfg(unix)]
+fn proteger_sesion_chatgpt_file(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if path.exists() {
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+}
+
 async fn resolver_modelo(provider: ModeloLLM, credential: &ProviderCredential) -> Result<String> {
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(
@@ -458,9 +504,21 @@ async fn resolver_modelo(provider: ModeloLLM, credential: &ProviderCredential) -
             spinner.finish_and_clear();
             m
         }
+        Ok(_) if provider == ModeloLLM::ChatGPT => {
+            spinner.finish_and_clear();
+            eprintln!("  [!] ChatGPT no devolvió modelos. Puedes introducir el slug manualmente.");
+            return resolver_modelo_manual("");
+        }
         Ok(_) => {
             spinner.finish_and_clear();
             bail!("No se encontraron modelos disponibles para {provider}.");
+        }
+        Err(_) if provider == ModeloLLM::ChatGPT => {
+            spinner.finish_and_clear();
+            eprintln!(
+                "  [!] No se pudo listar modelos de ChatGPT. Puedes introducir el slug manualmente."
+            );
+            return resolver_modelo_manual("");
         }
         Err(e) => {
             spinner.finish_and_clear();
@@ -480,6 +538,21 @@ async fn resolver_modelo(provider: ModeloLLM, credential: &ProviderCredential) -
         .interact()?;
 
     Ok(modelos[selection].id.clone())
+}
+
+fn resolver_modelo_manual(actual: &str) -> Result<String> {
+    let modelo: String = Input::new()
+        .with_prompt("Identificador del modelo")
+        .with_initial_text(actual)
+        .validate_with(|value: &String| {
+            if value.trim().is_empty() {
+                Err("El identificador del modelo no puede estar vacío")
+            } else {
+                Ok(())
+            }
+        })
+        .interact_text()?;
+    Ok(modelo.trim().to_string())
 }
 
 #[cfg(test)]
