@@ -48,7 +48,9 @@ impl AgentRunner {
                     let _ = event_tx.send(AgentEvent::SystemMessage(message));
                 }
                 UserInput::Reconfigure(settings) => {
-                    self.brain.reconfigure(settings);
+                    if let Err(error) = self.brain.reconfigure(settings) {
+                        let _ = event_tx.send(AgentEvent::Error(error.to_string()));
+                    }
                 }
                 UserInput::Exit => break,
             }

@@ -270,13 +270,15 @@ pub async fn run_tui(
                             provider: updated.provider,
                             model: updated.model.clone(),
                             preamble: updated.preamble.clone(),
-                            api_key: updated.api_key.clone(),
+                            credential: updated.credential.clone(),
                             temperature: updated.temperature,
+                            reasoning_effort: updated.reasoning_effort,
                         };
                         session_info.update(
                             format!("{}", updated.provider),
                             updated.model.clone(),
                             updated.temperature,
+                            updated.reasoning_effort,
                             updated.verbose,
                             &updated.config_path,
                             &updated.prompt_path,

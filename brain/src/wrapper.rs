@@ -1,5 +1,6 @@
 use crate::provedores::deepseek::ProvedorDeepSeek;
 use crate::provedores::gemini::ProvedorGemini;
+use crate::provedores::openai::{ProvedorOpenAI, ReasoningEffort};
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use rig::agent::MultiTurnStreamItem;
@@ -20,6 +21,10 @@ pub enum BrainError {
     /// Error al modificar la memoria de la conversación.
     #[error("Error de memoria: {0}")]
     Memory(String),
+
+    /// Error al inicializar o configurar un proveedor.
+    #[error("Error de configuración del proveedor: {0}")]
+    Provider(String),
 }
 
 pub const CONVERSATION_ID: &str = "typhon-chat";
@@ -29,6 +34,7 @@ pub const CONVERSATION_ID: &str = "typhon-chat";
 pub enum ModeloLLM {
     Gemini,
     DeepSeek,
+    OpenAI,
 }
 
 impl std::fmt::Display for ModeloLLM {
@@ -36,6 +42,23 @@ impl std::fmt::Display for ModeloLLM {
         match self {
             Self::Gemini => write!(f, "Gemini"),
             Self::DeepSeek => write!(f, "DeepSeek"),
+            Self::OpenAI => write!(f, "OpenAI API"),
+        }
+    }
+}
+
+/// Credencial runtime necesaria para inicializar un proveedor.
+/// Nunca se serializa: las API keys viven únicamente en memoria y la sesión
+/// OAuth se conserva en el archivo indicado por `auth_file`.
+#[derive(Clone)]
+pub enum ProviderCredential {
+    ApiKey(String),
+}
+
+impl std::fmt::Debug for ProviderCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ApiKey(_) => formatter.write_str("ApiKey(<redacted>)"),
         }
     }
 }
@@ -44,6 +67,7 @@ impl std::fmt::Display for ModeloLLM {
 pub enum ActiveAgent {
     Gemini(ProvedorGemini),
     DeepSeek(ProvedorDeepSeek),
+    OpenAI(ProvedorOpenAI),
 }
 
 /// Información normalizada de un modelo LLM, independiente del proveedor.
@@ -62,8 +86,9 @@ pub struct AgentSettings {
     pub provider: ModeloLLM,
     pub model: String,
     pub preamble: String,
-    pub api_key: String,
+    pub credential: ProviderCredential,
     pub temperature: f64,
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl std::fmt::Debug for AgentSettings {
@@ -73,8 +98,9 @@ impl std::fmt::Debug for AgentSettings {
             .field("provider", &self.provider)
             .field("model", &self.model)
             .field("preamble", &self.preamble)
-            .field("api_key", &"[redacted]")
+            .field("credential", &self.credential)
             .field("temperature", &self.temperature)
+            .field("reasoning_effort", &self.reasoning_effort)
             .finish()
     }
 }
@@ -93,7 +119,7 @@ pub enum StreamChunk {
 /// Wrapper principal que abstrae la interacción con distintos proveedores LLM.
 ///
 /// Permite crear un agente y hacer streaming de prompts de forma uniforme,
-/// independientemente de si el backend es Gemini o DeepSeek.
+/// independientemente del proveedor configurado.
 pub struct BrainWrapper {
     agent: ActiveAgent,
     memory: InMemoryConversationMemory,
@@ -129,50 +155,76 @@ impl BrainWrapper {
     /// * `provedor` - El proveedor LLM a utilizar.
     /// * `model` - Identificador del modelo (e.g. `"gemini-2.0-flash"`).
     /// * `preamble` - System prompt del agente.
-    /// * `api_key` - Clave de API del proveedor.
+    /// * `credential` - API key o sesión OAuth del proveedor.
     /// * `temperature` - Temperatura de generación (0.0 - 2.0).
+    /// * `reasoning_effort` - Nivel opcional de razonamiento para OpenAI.
     /// * `memory` - Memoria de conversación para contexto multi-turno.
     pub fn new(
         provedor: ModeloLLM,
         model: &str,
         preamble: &str,
-        api_key: &str,
+        credential: ProviderCredential,
         temperature: f64,
+        reasoning_effort: Option<ReasoningEffort>,
         memory: InMemoryConversationMemory,
-    ) -> Self {
+    ) -> Result<Self, BrainError> {
         let settings = AgentSettings {
             provider: provedor,
             model: model.to_string(),
             preamble: preamble.to_string(),
-            api_key: api_key.to_string(),
+            credential,
             temperature,
+            reasoning_effort,
         };
-        let agent = Self::build_agent(&settings, &memory);
-        Self { agent, memory }
+        let agent = Self::build_agent(&settings, &memory)?;
+        Ok(Self { agent, memory })
     }
 
-    fn build_agent(settings: &AgentSettings, memory: &InMemoryConversationMemory) -> ActiveAgent {
-        match settings.provider {
+    fn build_agent(
+        settings: &AgentSettings,
+        memory: &InMemoryConversationMemory,
+    ) -> Result<ActiveAgent, BrainError> {
+        let api_key = || match &settings.credential {
+            ProviderCredential::ApiKey(key) if !key.trim().is_empty() => Ok(key.as_str()),
+            _ => Err(BrainError::Provider(
+                "El proveedor requiere una API key".to_string(),
+            )),
+        };
+
+        let agent = match settings.provider {
             ModeloLLM::Gemini => ActiveAgent::Gemini(ProvedorGemini::new(
                 &settings.preamble,
                 memory.clone(),
                 &settings.model,
-                &settings.api_key,
+                api_key()?,
                 settings.temperature,
             )),
             ModeloLLM::DeepSeek => ActiveAgent::DeepSeek(ProvedorDeepSeek::new(
                 &settings.preamble,
                 memory.clone(),
                 &settings.model,
-                &settings.api_key,
+                api_key()?,
                 settings.temperature,
             )),
-        }
+            ModeloLLM::OpenAI => ActiveAgent::OpenAI(
+                ProvedorOpenAI::new(
+                    &settings.preamble,
+                    memory.clone(),
+                    &settings.model,
+                    api_key()?,
+                    settings.temperature,
+                    settings.reasoning_effort,
+                )
+                .map_err(|error| BrainError::Provider(error.to_string()))?,
+            ),
+        };
+        Ok(agent)
     }
 
     /// Reemplaza el cliente del proveedor conservando la memoria de conversación.
-    pub fn reconfigure(&mut self, settings: AgentSettings) {
-        self.agent = Self::build_agent(&settings, &self.memory);
+    pub fn reconfigure(&mut self, settings: AgentSettings) -> Result<(), BrainError> {
+        self.agent = Self::build_agent(&settings, &self.memory)?;
+        Ok(())
     }
 
     /// Borra el historial de la conversación activa sin reiniciar el proceso.
@@ -202,12 +254,20 @@ impl BrainWrapper {
                 let stream = d.agent.stream_prompt(prompt).max_turns(max).await;
                 Ok(stream.map(map_stream_item).boxed())
             }
+            ActiveAgent::OpenAI(o) => {
+                let stream = o.agent.stream_prompt(prompt).max_turns(max).await;
+                Ok(stream.map(map_stream_item).boxed())
+            }
         }
     }
 
     /// Retorna la lista estática de proveedores LLM soportados.
     pub fn listar_provedores() -> &'static [ModeloLLM] {
-        &[ModeloLLM::Gemini, ModeloLLM::DeepSeek]
+        &[
+            ModeloLLM::Gemini,
+            ModeloLLM::DeepSeek,
+            ModeloLLM::OpenAI,
+        ]
     }
 }
 
@@ -216,9 +276,13 @@ impl ModeloLLM {
     ///
     /// Retorna una lista normalizada de [`InfoModelo`] independiente del proveedor.
     /// Para Gemini, el prefijo `"models/"` se elimina del ID del modelo.
-    pub async fn listar_modelos(&self, api_key: &str) -> Result<Vec<InfoModelo>, BrainError> {
+    pub async fn listar_modelos(
+        &self,
+        credential: &ProviderCredential,
+    ) -> Result<Vec<InfoModelo>, BrainError> {
         match self {
             ModeloLLM::DeepSeek => {
+                let api_key = require_api_key(credential)?;
                 let models = ProvedorDeepSeek::listar_modelos(api_key, None)
                     .await
                     .map_err(|e| BrainError::ListModels(e.to_string()))?;
@@ -231,6 +295,7 @@ impl ModeloLLM {
                     .collect())
             }
             ModeloLLM::Gemini => {
+                let api_key = require_api_key(credential)?;
                 let models = ProvedorGemini::listar_modelos(api_key, None)
                     .await
                     .map_err(|e| BrainError::ListModels(e.to_string()))?;
@@ -249,7 +314,29 @@ impl ModeloLLM {
                     })
                     .collect())
             }
+            ModeloLLM::OpenAI => {
+                let api_key = require_api_key(credential)?;
+                let models = ProvedorOpenAI::listar_modelos(api_key)
+                    .await
+                    .map_err(|e| BrainError::ListModels(e.to_string()))?;
+                Ok(models
+                    .into_iter()
+                    .map(|model| InfoModelo {
+                        id: model.id,
+                        owned_by: model.owned_by,
+                    })
+                    .collect())
+            }
         }
+    }
+}
+
+fn require_api_key(credential: &ProviderCredential) -> Result<&str, BrainError> {
+    match credential {
+        ProviderCredential::ApiKey(key) if !key.trim().is_empty() => Ok(key),
+        _ => Err(BrainError::ListModels(
+            "El proveedor requiere una API key".to_string(),
+        )),
     }
 }
 
@@ -303,14 +390,13 @@ mod tests {
     fn test_modelo_llm_display() {
         assert_eq!(format!("{}", ModeloLLM::Gemini), "Gemini");
         assert_eq!(format!("{}", ModeloLLM::DeepSeek), "DeepSeek");
+        assert_eq!(format!("{}", ModeloLLM::OpenAI), "OpenAI API");
     }
 
     #[test]
     fn test_modelo_llm_display_vs_debug_consistency() {
-        // Display y Debug producen el mismo resultado para este enum
-        for m in BrainWrapper::listar_provedores() {
-            assert_eq!(format!("{}", m), format!("{:?}", m));
-        }
+        assert_eq!(format!("{}", ModeloLLM::Gemini), "Gemini");
+        assert_eq!(format!("{}", ModeloLLM::DeepSeek), "DeepSeek");
     }
 
     #[test]
@@ -379,9 +465,10 @@ mod tests {
     #[test]
     fn test_listar_provedores_contenido() {
         let provs = BrainWrapper::listar_provedores();
-        assert_eq!(provs.len(), 2);
+        assert_eq!(provs.len(), 3);
         assert!(provs.contains(&ModeloLLM::Gemini));
         assert!(provs.contains(&ModeloLLM::DeepSeek));
+        assert!(provs.contains(&ModeloLLM::OpenAI));
     }
 
     #[test]
@@ -389,6 +476,7 @@ mod tests {
         let provs = BrainWrapper::listar_provedores();
         assert_eq!(provs[0], ModeloLLM::Gemini);
         assert_eq!(provs[1], ModeloLLM::DeepSeek);
+        assert_eq!(provs[2], ModeloLLM::OpenAI);
     }
 
     // ── Mapping: Gemini → InfoModelo (strip_prefix logic) ──────────

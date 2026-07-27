@@ -1,4 +1,4 @@
-use brain::ModeloLLM;
+use brain::{ModeloLLM, ProviderCredential, ReasoningEffort};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -8,6 +8,8 @@ pub struct ConfigFile {
     pub provider: ModeloLLM,
     pub model: String,
     pub temperature: f64,
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(default)]
     pub verbose: bool,
     #[serde(default = "default_prompt_file")]
@@ -23,8 +25,9 @@ fn default_prompt_file() -> String {
 pub struct TyphonConfig {
     pub provider: ModeloLLM,
     pub model: String,
-    pub api_key: String,
+    pub credential: ProviderCredential,
     pub temperature: f64,
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub preamble: String,
     pub config_path: PathBuf,
     pub prompt_path: PathBuf,

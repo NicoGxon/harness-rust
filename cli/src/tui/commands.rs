@@ -1,4 +1,4 @@
-use brain::Usage;
+use brain::{ReasoningEffort, Usage};
 use std::path::Path;
 
 /// Información no sensible de la sesión que se muestra en `/status` y `/config`.
@@ -7,6 +7,7 @@ pub struct SessionInfo {
     pub provider: String,
     pub model: String,
     pub temperature: f64,
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub max_turns: u32,
     pub current_dir: String,
     pub config_path: String,
@@ -19,6 +20,7 @@ impl SessionInfo {
         provider: String,
         model: String,
         temperature: f64,
+        reasoning_effort: Option<ReasoningEffort>,
         max_turns: u32,
         current_dir: String,
         config_path: &Path,
@@ -29,6 +31,7 @@ impl SessionInfo {
             provider,
             model,
             temperature,
+            reasoning_effort,
             max_turns,
             current_dir,
             config_path: config_path.display().to_string(),
@@ -42,6 +45,7 @@ impl SessionInfo {
         provider: String,
         model: String,
         temperature: f64,
+        reasoning_effort: Option<ReasoningEffort>,
         verbose: bool,
         config_path: &Path,
         prompt_path: &Path,
@@ -49,6 +53,7 @@ impl SessionInfo {
         self.provider = provider;
         self.model = model;
         self.temperature = temperature;
+        self.reasoning_effort = reasoning_effort;
         self.verbose = verbose;
         self.config_path = config_path.display().to_string();
         self.prompt_path = prompt_path.display().to_string();
@@ -120,10 +125,11 @@ pub fn help_text() -> &'static str {
 
 pub fn status_text(info: &SessionInfo, session_usage: &Usage) -> String {
     format!(
-        "Estado de Typhon:\n  Proveedor: {}\n  Modelo: {}\n  Temperatura: {:.2}\n  Máximo de turnos: {}\n  Directorio: {}\n  Consumo de la conversación: {}",
+        "Estado de Typhon:\n  Proveedor: {}\n  Modelo: {}\n  Temperatura: {:.2}\n  Razonamiento: {}\n  Máximo de turnos: {}\n  Directorio: {}\n  Consumo de la conversación: {}",
         info.provider,
         info.model,
         info.temperature,
+        format_reasoning_effort(info.reasoning_effort),
         info.max_turns,
         info.current_dir,
         session_usage_text(session_usage)
@@ -136,25 +142,39 @@ pub fn session_usage_text(usage: &Usage) -> String {
     }
 
     format!(
-        "Tokens: {} entrada / {} salida / {} total",
-        usage.input_tokens, usage.output_tokens, usage.total_tokens
+        "Tokens: {} entrada / {} salida / {} total{}",
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.total_tokens,
+        if usage.reasoning_tokens > 0 {
+            format!(" / {} razonamiento", usage.reasoning_tokens)
+        } else {
+            String::new()
+        }
     )
 }
 
 pub fn config_text(info: &SessionInfo) -> String {
     format!(
-        "Configuración activa:\n  Archivo de configuración: {}\n  System prompt: {}\n  Proveedor: {}\n  Modelo: {}\n  Temperatura: {:.2}\n  Verbose: {}",
+        "Configuración activa:\n  Archivo de configuración: {}\n  System prompt: {}\n  Proveedor: {}\n  Modelo: {}\n  Temperatura: {:.2}\n  Razonamiento: {}\n  Verbose: {}",
         info.config_path,
         info.prompt_path,
         info.provider,
         info.model,
         info.temperature,
+        format_reasoning_effort(info.reasoning_effort),
         if info.verbose {
             "activado"
         } else {
             "desactivado"
         }
     )
+}
+
+fn format_reasoning_effort(effort: Option<ReasoningEffort>) -> String {
+    effort
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "automático".to_string())
 }
 
 pub fn tools_text() -> &'static str {
@@ -229,6 +249,16 @@ mod tests {
         assert_eq!(
             session_usage_text(&Usage::default()),
             "Sin tokens reportados todavía"
+        );
+        assert_eq!(
+            session_usage_text(&Usage {
+                input_tokens: 10,
+                output_tokens: 4,
+                total_tokens: 14,
+                reasoning_tokens: 7,
+                ..Usage::default()
+            }),
+            "Tokens: 10 entrada / 4 salida / 14 total / 7 razonamiento"
         );
     }
 }

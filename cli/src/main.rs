@@ -28,18 +28,20 @@ async fn main() -> Result<()> {
         config.provider,
         &config.model,
         &config.preamble,
-        &config.api_key,
+        config.credential.clone(),
         config.temperature,
+        config.reasoning_effort,
         memory,
-    );
+    )?;
 
     let runner = agent_core::AgentRunner::new(brain, 10, Vec::new());
-    let provider_str = format!("{:?}", config.provider);
+    let provider_str = format!("{}", config.provider);
 
     let session_info = tui::commands::SessionInfo::from_paths(
         provider_str.clone(),
         config.model.clone(),
         config.temperature,
+        config.reasoning_effort,
         10,
         current_dir,
         &config.config_path,

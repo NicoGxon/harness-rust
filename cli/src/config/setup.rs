@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use brain::{BrainWrapper, ModeloLLM};
+use brain::{BrainWrapper, ModeloLLM, ProviderCredential, ReasoningEffort};
 use console::style;
 use dialoguer::{Confirm, Editor, Input, Select};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -55,13 +55,14 @@ pub async fn resolver_config(force_reconfig: bool) -> Result<TyphonConfig> {
         )
     })?;
 
-    let api_key = resolver_api_key(config_file.provider)?;
+    let credential = resolver_credencial(config_file.provider, &config_dir).await?;
 
     Ok(TyphonConfig {
         provider: config_file.provider,
         model: config_file.model,
-        api_key,
+        credential,
         temperature: config_file.temperature,
+        reasoning_effort: config_file.reasoning_effort,
         preamble,
         config_path,
         prompt_path,
@@ -77,13 +78,15 @@ async fn cargar_o_crear_config(
     if force_reconfig || !config_path.exists() {
         println!("  [i] Iniciando configuración de proveedor y modelo..."); // Proceso directo de creación de configuración
         let provider = resolver_proveedor()?;
-        let api_key_temp = resolver_api_key(provider)?;
-        let model = resolver_modelo(provider, &api_key_temp).await?;
+        let credential = resolver_credencial(provider, config_dir).await?;
+        let model = resolver_modelo(provider, &credential).await?;
+        let reasoning_effort = resolver_nivel_razonamiento(provider, None)?;
 
         let config_file = ConfigFile {
             provider,
             model,
             temperature: 0.7,
+            reasoning_effort,
             verbose: true,
             prompt_file: "system_prompt.md".to_string(),
         };
@@ -138,7 +141,7 @@ pub async fn editar_configuracion(config: &TyphonConfig) -> Result<Option<Typhon
         .with_context(|| format!("Error al leer {}", config_path.display()))?;
     let mut working: ConfigFile = toml::from_str(&content)
         .with_context(|| format!("Error al deserializar {}", config_path.display()))?;
-    let mut working_api_key = config.api_key.clone();
+    let mut working_credential = config.credential.clone();
     let mut prompt_path = resolver_prompt_path(&config_dir, &working.prompt_file);
     let mut prompt_content = fs::read_to_string(&prompt_path).with_context(|| {
         format!(
@@ -154,6 +157,10 @@ pub async fn editar_configuracion(config: &TyphonConfig) -> Result<Option<Typhon
                 working.provider, working.model
             ),
             format!("Temperatura ({:.2})", working.temperature),
+            format!(
+                "Nivel de razonamiento ({})",
+                formato_nivel_razonamiento(working.provider, working.reasoning_effort)
+            ),
             format!(
                 "Verbose ({})",
                 if working.verbose {
@@ -175,16 +182,19 @@ pub async fn editar_configuracion(config: &TyphonConfig) -> Result<Option<Typhon
 
         match selection {
             0 => {
-                let (provider, model, api_key) = resolver_proveedor_y_modelo(
+                let (provider, model, credential) = resolver_proveedor_y_modelo(
                     working.provider,
                     &working.model,
-                    &working_api_key,
+                    &working_credential,
                     config,
                 )
                 .await?;
                 working.provider = provider;
                 working.model = model;
-                working_api_key = api_key;
+                working_credential = credential;
+                if !proveedor_admite_razonamiento(provider) {
+                    working.reasoning_effort = None;
+                }
             }
             1 => {
                 let value: String = Input::new()
@@ -200,17 +210,21 @@ pub async fn editar_configuracion(config: &TyphonConfig) -> Result<Option<Typhon
                     .context("La temperatura introducida no es válida")?;
             }
             2 => {
+                working.reasoning_effort =
+                    resolver_nivel_razonamiento(working.provider, working.reasoning_effort)?;
+            }
+            3 => {
                 working.verbose = Confirm::new()
                     .with_prompt("¿Activar mensajes detallados?")
                     .default(working.verbose)
                     .interact()?;
             }
-            3 => {
+            4 => {
                 if let Some(edited) = Editor::new().edit(&prompt_content)? {
                     prompt_content = edited;
                 }
             }
-            4 => {
+            5 => {
                 let new_file: String = Input::new()
                     .with_prompt("Ruta del system prompt")
                     .with_initial_text(&working.prompt_file)
@@ -236,15 +250,16 @@ pub async fn editar_configuracion(config: &TyphonConfig) -> Result<Option<Typhon
                     prompt_path = new_path;
                 }
             }
-            5 => {
+            6 => {
                 fs::write(&prompt_path, &prompt_content)
                     .with_context(|| format!("Error al guardar {}", prompt_path.display()))?;
                 guardar_config(&config_path, &working)?;
                 return Ok(Some(TyphonConfig {
                     provider: working.provider,
                     model: working.model,
-                    api_key: working_api_key,
+                    credential: working_credential,
                     temperature: working.temperature,
+                    reasoning_effort: working.reasoning_effort,
                     preamble: prompt_content,
                     config_path,
                     prompt_path,
@@ -264,6 +279,49 @@ fn resolver_prompt_path(config_dir: &Path, prompt_file: &str) -> PathBuf {
     }
 }
 
+fn proveedor_admite_razonamiento(provider: ModeloLLM) -> bool {
+    matches!(provider, ModeloLLM::OpenAI)
+}
+
+fn formato_nivel_razonamiento(
+    provider: ModeloLLM,
+    reasoning_effort: Option<ReasoningEffort>,
+) -> String {
+    if !proveedor_admite_razonamiento(provider) {
+        return "no aplica".to_string();
+    }
+    reasoning_effort
+        .map(|effort| effort.to_string())
+        .unwrap_or_else(|| "automático".to_string())
+}
+
+fn resolver_nivel_razonamiento(
+    provider: ModeloLLM,
+    current: Option<ReasoningEffort>,
+) -> Result<Option<ReasoningEffort>> {
+    if !proveedor_admite_razonamiento(provider) {
+        return Ok(None);
+    }
+
+    let mut items = vec!["Automático (predeterminado)".to_string()];
+    items.extend(
+        ReasoningEffort::ALL
+            .into_iter()
+            .map(|effort| effort.to_string()),
+    );
+    let default = current
+        .and_then(|effort| ReasoningEffort::ALL.iter().position(|item| *item == effort))
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let selection = Select::new()
+        .with_prompt("Nivel de razonamiento")
+        .items(&items)
+        .default(default)
+        .interact()?;
+
+    Ok((selection > 0).then(|| ReasoningEffort::ALL[selection - 1]))
+}
+
 fn guardar_config(config_path: &Path, config_file: &ConfigFile) -> Result<()> {
     let toml_str =
         toml::to_string_pretty(config_file).context("Error al serializar la configuración")?;
@@ -275,9 +333,13 @@ fn guardar_config(config_path: &Path, config_file: &ConfigFile) -> Result<()> {
 async fn resolver_proveedor_y_modelo(
     current_provider: ModeloLLM,
     current_model: &str,
-    current_api_key: &str,
+    current_credential: &ProviderCredential,
     config: &TyphonConfig,
-) -> Result<(ModeloLLM, String, String)> {
+) -> Result<(ModeloLLM, String, ProviderCredential)> {
+    let config_dir = config
+        .config_path
+        .parent()
+        .context("La configuración no tiene un directorio padre")?;
     let providers: Vec<String> = BrainWrapper::listar_provedores()
         .iter()
         .map(ToString::to_string)
@@ -293,24 +355,29 @@ async fn resolver_proveedor_y_modelo(
         )
         .interact()?;
     let provider = BrainWrapper::listar_provedores()[provider_selection];
-    let api_key = if provider == current_provider {
-        current_api_key.to_string()
+    let credential = if provider == current_provider {
+        current_credential.clone()
     } else if provider == config.provider {
-        config.api_key.clone()
+        config.credential.clone()
     } else {
-        resolver_api_key(provider)?
+        resolver_credencial(provider, config_dir).await?
     };
-    let model = resolver_modelo_con_actual(provider, &api_key, current_model).await?;
-    Ok((provider, model, api_key))
+    let model_for_default = if provider == current_provider {
+        current_model
+    } else {
+        ""
+    };
+    let model = resolver_modelo_con_actual(provider, &credential, model_for_default).await?;
+    Ok((provider, model, credential))
 }
 
 async fn resolver_modelo_con_actual(
     provider: ModeloLLM,
-    api_key: &str,
+    credential: &ProviderCredential,
     current_model: &str,
 ) -> Result<String> {
     let modelos = provider
-        .listar_modelos(api_key)
+        .listar_modelos(credential)
         .await
         .with_context(|| format!("Error al consultar modelos de {provider}"))?;
     if modelos.is_empty() {
@@ -333,30 +400,32 @@ async fn resolver_modelo_con_actual(
 }
 
 fn resolver_proveedor() -> Result<ModeloLLM> {
-    let items = &["DeepSeek", "Gemini"];
+    let providers = BrainWrapper::listar_provedores();
+    let items: Vec<String> = providers.iter().map(ToString::to_string).collect();
     let selection = Select::new()
         .with_prompt("Selecciona el proveedor de LLM")
-        .items(items)
+        .items(&items)
         .default(0)
         .interact()?;
 
-    Ok(match selection {
-        1 => ModeloLLM::Gemini,
-        _ => ModeloLLM::DeepSeek,
-    })
+    Ok(providers[selection])
 }
 
-fn resolver_api_key(provider: ModeloLLM) -> Result<String> {
+async fn resolver_credencial(
+    provider: ModeloLLM,
+    _config_dir: &Path,
+) -> Result<ProviderCredential> {
     let env_key_name = match provider {
         ModeloLLM::Gemini => "GEMINI_API_KEY",
         ModeloLLM::DeepSeek => "DEEP_SEEK_API_KEY",
+        ModeloLLM::OpenAI => "OPENAI_API_KEY",
     };
 
     // Intentar desde .env primero
     if let Ok(key) = env::var(env_key_name)
         && !key.is_empty()
     {
-        return Ok(key);
+        return Ok(ProviderCredential::ApiKey(key));
     }
 
     // Si no hay en .env, pedir interactivamente
@@ -371,10 +440,10 @@ fn resolver_api_key(provider: ModeloLLM) -> Result<String> {
         })
         .interact_text()?;
 
-    Ok(key.trim().to_string())
+    Ok(ProviderCredential::ApiKey(key.trim().to_string()))
 }
 
-async fn resolver_modelo(provider: ModeloLLM, api_key: &str) -> Result<String> {
+async fn resolver_modelo(provider: ModeloLLM, credential: &ProviderCredential) -> Result<String> {
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(
         ProgressStyle::with_template("  {spinner:.cyan} {msg}")
@@ -384,7 +453,7 @@ async fn resolver_modelo(provider: ModeloLLM, api_key: &str) -> Result<String> {
     spinner.set_message("Consultando modelos disponibles...");
     spinner.enable_steady_tick(Duration::from_millis(80));
 
-    let modelos = match provider.listar_modelos(api_key).await {
+    let modelos = match provider.listar_modelos(credential).await {
         Ok(m) if !m.is_empty() => {
             spinner.finish_and_clear();
             m
@@ -436,6 +505,7 @@ mod tests {
             provider: ModeloLLM::Gemini,
             model: "gemini-test".to_string(),
             temperature: 0.4,
+            reasoning_effort: None,
             verbose: false,
             prompt_file: "prompt.md".to_string(),
         };
@@ -444,5 +514,21 @@ mod tests {
 
         assert_eq!(restored, original);
         assert!(!serialized.contains("api_key"));
+    }
+
+    #[test]
+    fn config_file_roundtrips_reasoning_effort() {
+        let original = ConfigFile {
+            provider: ModeloLLM::OpenAI,
+            model: "gpt-5".to_string(),
+            temperature: 0.7,
+            reasoning_effort: Some(ReasoningEffort::High),
+            verbose: true,
+            prompt_file: "system_prompt.md".to_string(),
+        };
+        let serialized = toml::to_string(&original).unwrap();
+        assert!(serialized.contains("reasoning_effort = \"high\""));
+        let restored: ConfigFile = toml::from_str(&serialized).unwrap();
+        assert_eq!(restored.reasoning_effort, Some(ReasoningEffort::High));
     }
 }
